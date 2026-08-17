@@ -48,7 +48,12 @@ async function dispatchJob(environment: McpRuntimeEnv, job: AsyncJob): Promise<v
     case "bot-query": {
       const response = await answerBotQuery(environment, job);
       if (response !== null) {
-        await sendLineReply(environment, job.response.replyToken, response);
+        await sendLineReply(
+          environment,
+          job.response.replyToken,
+          response,
+          job.externalChannelId ?? job.externalUserId,
+        );
       }
       return;
     }

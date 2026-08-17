@@ -83,6 +83,7 @@ export async function sendLineReply(
   environment: Pick<McpRuntimeEnv, "LINE_CHANNEL_ACCESS_TOKEN">,
   replyToken: string,
   text: string,
+  pushTarget?: string,
 ): Promise<void> {
   const response = await fetch("https://api.line.me/v2/bot/message/reply", {
     method: "POST",
@@ -92,8 +93,22 @@ export async function sendLineReply(
     },
     body: JSON.stringify({ replyToken, messages: [{ type: "text", text }] }),
   });
-  if (!response.ok) {
+  if (response.ok) return;
+  if (pushTarget === undefined) {
     throw new Error(`LINE reply failed with status ${String(response.status)}`);
+  }
+  const push = await fetch("https://api.line.me/v2/bot/message/push", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${environment.LINE_CHANNEL_ACCESS_TOKEN}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ to: pushTarget, messages: [{ type: "text", text }] }),
+  });
+  if (!push.ok) {
+    throw new Error(
+      `LINE reply and push failed with statuses ${String(response.status)}/${String(push.status)}`,
+    );
   }
 }
 
