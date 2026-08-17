@@ -37,6 +37,22 @@ export interface ReplaceMarkdownInput {
   pageId: string;
   bodyMarkdown: string;
   requestedBy: string;
+  expectedBaseRevision: number;
+}
+
+export type ReplaceMarkdownResult =
+  | { ok: true; sequence: number; baseRevision: number }
+  | {
+      ok: false;
+      reason: "revision_conflict";
+      currentRevision: number;
+      dirty: boolean;
+    };
+
+export interface PageRoomPersistenceStatus {
+  baseRevision: number;
+  dirty: boolean;
+  nextFlushAt: number | null;
 }
 
 export class PageRoom extends DurableObject<PageRoomEnv> {
@@ -234,7 +250,7 @@ export class PageRoom extends DurableObject<PageRoomEnv> {
 
   public async replaceMarkdown(
     input: ReplaceMarkdownInput,
-  ): Promise<{ sequence: number }> {
+  ): Promise<ReplaceMarkdownResult> {
     if (
       input.workspaceId.length === 0 ||
       input.pageId.length === 0 ||
@@ -254,6 +270,18 @@ export class PageRoom extends DurableObject<PageRoomEnv> {
     if (!(await this.ensureInitialized(input.workspaceId, input.pageId))) {
       throw new Error("Page does not exist");
     }
+    const meta = this.roomStorage.getMeta();
+    if (
+      meta.dirty ||
+      meta.baseRevision !== input.expectedBaseRevision
+    ) {
+      return {
+        ok: false,
+        reason: "revision_conflict",
+        currentRevision: meta.baseRevision,
+        dirty: meta.dirty,
+      };
+    }
 
     const clone = new Y.Doc();
     Y.applyUpdate(clone, Y.encodeStateAsUpdate(this.document));
@@ -268,7 +296,26 @@ export class PageRoom extends DurableObject<PageRoomEnv> {
     Y.applyUpdate(this.document, update, input.requestedBy);
     await this.scheduleNextAlarm(persisted.nextFlushAt);
     this.broadcastBinaryUpdate(update);
-    return { sequence: persisted.sequence };
+    return {
+      ok: true,
+      sequence: persisted.sequence,
+      baseRevision: meta.baseRevision,
+    };
+  }
+
+  public async flushNow(): Promise<PageRoomPersistenceStatus> {
+    await this.flushCurrentBody(Date.now());
+    await this.scheduleNextAlarm();
+    return this.getPersistenceStatus();
+  }
+
+  public getPersistenceStatus(): PageRoomPersistenceStatus {
+    const meta = this.roomStorage.getMeta();
+    return {
+      baseRevision: meta.baseRevision,
+      dirty: meta.dirty,
+      nextFlushAt: meta.nextFlushAt,
+    };
   }
 
   public async reauthorizeUser(
