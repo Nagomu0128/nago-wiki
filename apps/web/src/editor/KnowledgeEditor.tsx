@@ -96,6 +96,13 @@ const CrepeSurface = forwardRef<EditorSurfaceHandle, CrepeSurfaceProps>(function
       }
       crepeRef.current = crepe;
       crepe.setReadonly(readOnlyRef.current);
+      const synchronizedMarkdown = sharedMarkdown.toJSON();
+      if (synchronizedMarkdown && synchronizedMarkdown !== crepe.getMarkdown()) {
+        applyingRemoteRef.current = true;
+        crepe.editor.action(replaceAll(synchronizedMarkdown));
+        applyingRemoteRef.current = false;
+        onRemoteMarkdownChangeRef.current?.(synchronizedMarkdown);
+      }
       const editor = rootRef.current?.querySelector<HTMLElement>("[contenteditable='true']");
       editor?.setAttribute("aria-label", "Markdown本文");
       rootRef.current?.querySelectorAll<HTMLElement>("button:not([aria-label])").forEach((button) => {

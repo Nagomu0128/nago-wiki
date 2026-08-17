@@ -38,6 +38,7 @@ describe("KnowledgeEditor Crepe binding", () => {
     const realtime: RealtimeProviderFactory = {
       connect({ document, permission }) {
         sharedDocument = document;
+        replaceSharedMarkdown(document, "# Server snapshot", Symbol("initial-sync"));
         return {
           document,
           status: "connected",
@@ -56,7 +57,7 @@ describe("KnowledgeEditor Crepe binding", () => {
     const editor = view.container.querySelector<HTMLElement>("[contenteditable='true']");
 
     expect(editor?.getAttribute("aria-label")).toBe("Markdown本文");
-    expect(editor?.textContent).toContain("Initial body");
+    expect(editor?.textContent).toContain("Server snapshot");
     if (!sharedDocument) throw new Error("Realtime document was not connected");
     const connectedDocument = sharedDocument;
     act(() => { replaceSharedMarkdown(connectedDocument, "# Remote body", Symbol("remote")); });
