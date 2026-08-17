@@ -139,7 +139,10 @@ export class ExportWorkflow extends WorkflowEntrypoint<
 
       const completedParts: PartStepResult[] = [];
       for (let index = 0; index < plan.partCount; index += 1) {
-        const previousCrcs = completedParts.flatMap((part) => part.crc32);
+        const previousCrcs =
+          index === plan.partCount - 1
+            ? completedParts.flatMap((part) => part.crc32)
+            : [];
         const part = await step.do(
           `write archive part ${String(index + 1).padStart(5, "0")}`,
           async () =>
