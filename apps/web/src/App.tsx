@@ -110,7 +110,7 @@ export function App({ api = defaultApi, realtimeFactory = defaultRealtimeFactory
     [api, effectiveSelectedPageId],
     Boolean(effectiveSelectedPageId),
   );
-  const queriedPage = page.data?.page.id === effectiveSelectedPageId ? page.data : undefined;
+  const queriedPage = page.status === "success" && page.data.page.id === effectiveSelectedPageId ? page.data : undefined;
   const visiblePage = pageOverride?.page.id === effectiveSelectedPageId ? pageOverride : queriedPage;
 
   useEffect(() => {
