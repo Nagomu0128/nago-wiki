@@ -189,6 +189,27 @@ CREATE TABLE imports (
 CREATE INDEX imports_user_created_idx ON imports(user_id, created_at DESC);
 CREATE INDEX imports_status_updated_idx ON imports(status, updated_at);
 
+CREATE TABLE exports (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'ready', 'failed', 'cancelled')),
+  r2_key TEXT,
+  plan_r2_key TEXT,
+  multipart_upload_id TEXT,
+  page_count INTEGER NOT NULL DEFAULT 0 CHECK (page_count >= 0),
+  archive_size INTEGER CHECK (archive_size IS NULL OR archive_size >= 0),
+  archive_hash TEXT CHECK (archive_hash IS NULL OR length(archive_hash) = 64),
+  error_message TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  expires_at TEXT
+) STRICT;
+
+CREATE INDEX exports_workspace_created_idx
+  ON exports(workspace_id, created_at DESC);
+CREATE INDEX exports_status_updated_idx ON exports(status, updated_at);
+
 CREATE TABLE index_state (
   page_id TEXT PRIMARY KEY REFERENCES pages(id) ON DELETE CASCADE,
   desired_hash TEXT NOT NULL CHECK (length(desired_hash) = 64),
