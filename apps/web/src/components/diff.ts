@@ -6,6 +6,9 @@ export interface DiffLine {
 export function diffLines(before: string, after: string): DiffLine[] {
   const left = before.split("\n");
   const right = after.split("\n");
+  if ((left.length + 1) * (right.length + 1) > 250_000) {
+    return boundedDiff(left, right);
+  }
   const rows = left.length + 1;
   const columns = right.length + 1;
   const table = Array.from({ length: rows }, () => Array<number>(columns).fill(0));
@@ -39,4 +42,25 @@ export function diffLines(before: string, after: string): DiffLine[] {
   while (leftIndex < left.length) result.push({ kind: "removed", value: left[leftIndex++] ?? "" });
   while (rightIndex < right.length) result.push({ kind: "added", value: right[rightIndex++] ?? "" });
   return result;
+}
+
+function boundedDiff(left: string[], right: string[]): DiffLine[] {
+  let prefix = 0;
+  while (prefix < left.length && prefix < right.length && left[prefix] === right[prefix]) prefix += 1;
+
+  let suffix = 0;
+  while (
+    suffix < left.length - prefix &&
+    suffix < right.length - prefix &&
+    left[left.length - suffix - 1] === right[right.length - suffix - 1]
+  ) {
+    suffix += 1;
+  }
+
+  return [
+    ...left.slice(0, prefix).map((value): DiffLine => ({ kind: "same", value })),
+    ...left.slice(prefix, left.length - suffix).map((value): DiffLine => ({ kind: "removed", value })),
+    ...right.slice(prefix, right.length - suffix).map((value): DiffLine => ({ kind: "added", value })),
+    ...left.slice(left.length - suffix).map((value): DiffLine => ({ kind: "same", value })),
+  ];
 }
