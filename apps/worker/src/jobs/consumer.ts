@@ -1,9 +1,12 @@
 import { asyncJobSchema, type AsyncJob } from "./contracts";
 import { indexPage } from "./index-page";
+import { answerBotQuery } from "../bots/service";
+import { sendLineReply } from "../bots/line";
+import type { McpRuntimeEnv } from "../mcp/types";
 
 export async function consumeAsyncJobs(
   batch: MessageBatch,
-  environment: Env,
+  environment: McpRuntimeEnv,
 ): Promise<void> {
   await Promise.all(
     batch.messages.map(async (message) => {
@@ -33,11 +36,21 @@ export async function consumeAsyncJobs(
   );
 }
 
-async function dispatchJob(environment: Env, job: AsyncJob): Promise<void> {
-  await indexPage(
-    { database: environment.DB, search: environment.WIKI_SEARCH },
-    job,
-  );
+async function dispatchJob(environment: McpRuntimeEnv, job: AsyncJob): Promise<void> {
+  switch (job.type) {
+    case "index-page":
+      await indexPage(
+        { database: environment.DB, search: environment.WIKI_SEARCH },
+        job,
+      );
+      return;
+    case "bot-query": {
+      const response = await answerBotQuery(environment, job);
+      if (response !== null) {
+        await sendLineReply(environment, job.response.replyToken, response);
+      }
+    }
+  }
 }
 
 function retryDelaySeconds(attempts: number): number {

@@ -8,6 +8,23 @@ export const indexPageJobSchema = z.object({
   desiredHash: z.string().min(1),
 });
 
-export const asyncJobSchema = z.discriminatedUnion("type", [indexPageJobSchema]);
+export const botQueryJobSchema = z.object({
+  type: z.literal("bot-query"),
+  jobId: z.string().min(1),
+  provider: z.enum(["line", "discord"]),
+  eventId: z.string().min(1),
+  externalUserId: z.string().min(1),
+  externalChannelId: z.string().min(1).nullable(),
+  query: z.string().min(1).max(5_000),
+  response: z.discriminatedUnion("kind", [
+    z.object({ kind: z.literal("line-reply"), replyToken: z.string().min(1) }),
+  ]),
+});
+
+export const asyncJobSchema = z.discriminatedUnion("type", [
+  indexPageJobSchema,
+  botQueryJobSchema,
+]);
 export type AsyncJob = z.infer<typeof asyncJobSchema>;
 export type IndexPageJob = z.infer<typeof indexPageJobSchema>;
+export type BotQueryJob = z.infer<typeof botQueryJobSchema>;

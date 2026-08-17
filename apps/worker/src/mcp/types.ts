@@ -12,4 +12,7 @@ export interface McpRuntimeEnv extends Env {
   OAUTH_PROVIDER: OAuthHelpers;
   GOOGLE_CLIENT_SECRET: string;
   TOKEN_ENCRYPTION_KEY: string;
+  LINE_CHANNEL_SECRET: string;
+  LINE_CHANNEL_ACCESS_TOKEN: string;
+  DISCORD_BRIDGE_SECRET: string;
 }

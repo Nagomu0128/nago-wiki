@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 
 import { createAiRoutes } from "./ai/routes";
+import { createBotRoutes } from "./bots/routes";
 import { consumeAsyncJobs } from "./jobs/consumer";
 import { createImportRoutes } from "./imports/routes";
 import { createMcpOAuthProvider } from "./mcp/oauth";
@@ -13,6 +14,7 @@ const app = new Hono<{ Bindings: Env }>();
 
 app.route("/api/v1/ai", createAiRoutes());
 app.route("/api/v1", createImportRoutes());
+app.route("/api/v1", createBotRoutes());
 
 app.get("/api/v1/health", (context) =>
   context.json({
