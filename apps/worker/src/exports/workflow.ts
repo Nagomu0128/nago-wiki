@@ -182,9 +182,10 @@ export class ExportWorkflow extends WorkflowEntrypoint<
           this.env.DB.prepare(
             `INSERT INTO audit_events (
                id, actor_id, action, target_type, target_id, metadata_json, created_at
-             ) VALUES (?1, ?2, 'export.completed', 'export', ?3, ?4, ?5)`,
+             ) VALUES (?1, ?2, 'export.completed', 'export', ?3, ?4, ?5)
+             ON CONFLICT(id) DO NOTHING`,
           ).bind(
-            crypto.randomUUID(),
+            parameters.exportId,
             parameters.requestedBy,
             parameters.exportId,
             JSON.stringify({
@@ -210,10 +211,13 @@ export class ExportWorkflow extends WorkflowEntrypoint<
             .bind(parameters.exportId)
             .first<ExportDbRow>();
           if (row?.multipart_upload_id && row.r2_key) {
-            await this.env.FILES.resumeMultipartUpload(
-              row.r2_key,
-              row.multipart_upload_id,
-            ).abort();
+            const completed = await this.env.FILES.head(row.r2_key);
+            if (completed === null) {
+              await this.env.FILES.resumeMultipartUpload(
+                row.r2_key,
+                row.multipart_upload_id,
+              ).abort();
+            }
           }
           return { aborted: true as const };
         });
@@ -341,11 +345,13 @@ async function writeArchivePart(
     const data =
       index === plan.pages.length
         ? encoder.encode(manifest)
-        : encoder.encode(
-            requirePageBody(requiredAt(plan.pages, index, "export page"), pageBodies),
+        : requirePageBytes(
+            requiredAt(plan.pages, index, "export page"),
+            pageBodies,
           );
-    partCrcs.push(crc32(data));
-    records.push(buildStoredLocalRecord(entry, data));
+    const checksum = crc32(data);
+    partCrcs.push(checksum);
+    records.push(buildStoredLocalRecord(entry, data, checksum));
   }
   if (partIndex === plan.groups.length - 1) {
     const allCrcs = [...previousCrcs, ...partCrcs];
@@ -440,19 +446,20 @@ async function loadPageBodies(
   return new Map(rows.results.map((row) => [row.id, row]));
 }
 
-function requirePageBody(
+function requirePageBytes(
   planned: ExportPage,
   pageBodies: ReadonlyMap<string, PageBodyRow>,
-): string {
+): Uint8Array {
   const actual = pageBodies.get(planned.id);
+  const bytes = actual === undefined ? undefined : encoder.encode(actual.body_md);
   if (
     actual?.revision !== planned.revision ||
     actual.content_hash !== planned.contentHash ||
-    encoder.encode(actual.body_md).byteLength !== planned.bodyBytes
+    bytes?.byteLength !== planned.bodyBytes
   ) {
     throw new Error("Wiki changed while the export was being created; start a new export");
   }
-  return actual.body_md;
+  return bytes;
 }
 
 async function loadPlan(bucket: R2Bucket, key: string): Promise<StoredExportPlan> {

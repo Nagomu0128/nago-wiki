@@ -294,15 +294,28 @@ export function createImportRoutes(): Hono<ImportApi> {
         page.page.id,
         request.acceptedTags,
       );
-      await context.env.DB.prepare(
-        `UPDATE imports
-            SET status = 'applied',
-                source_metadata_json = json_set(source_metadata_json, '$.pageId', ?2),
-                updated_at = ?3
-          WHERE id = ?1 AND status = 'preview_ready'`,
-      )
-        .bind(importId, page.page.id, new Date().toISOString())
-        .run();
+      const appliedAt = new Date().toISOString();
+      await context.env.DB.batch([
+        context.env.DB.prepare(
+          `UPDATE imports
+              SET status = 'applied',
+                  source_metadata_json = json_set(source_metadata_json, '$.pageId', ?2),
+                  updated_at = ?3
+            WHERE id = ?1 AND status = 'preview_ready'`,
+        ).bind(importId, page.page.id, appliedAt),
+        context.env.DB.prepare(
+          `INSERT INTO audit_events (
+             id, actor_id, action, target_type, target_id, metadata_json, created_at
+           ) VALUES (?1, ?2, 'import.applied', 'import', ?3, ?4, ?5)
+           ON CONFLICT(id) DO NOTHING`,
+        ).bind(
+          importId,
+          identity.id,
+          importId,
+          JSON.stringify({ pageId: page.page.id, sourceType: value.source_type }),
+          appliedAt,
+        ),
+      ]);
       return context.json(
         await createRealtimeWikiCoreService(context.env).getPage(
           identity,
@@ -594,16 +607,12 @@ function preparePdf(
   if (!/^[A-Za-z\d+/]*={0,2}$/u.test(payload) || payload.length % 4 !== 0) {
     throw new HTTPException(400, { message: "PDF content must be valid base64" });
   }
-  let decoded: string;
-  try {
-    decoded = atob(payload);
-  } catch {
-    throw new HTTPException(400, { message: "PDF content must be valid base64" });
-  }
-  if (decoded.length > 20 * 1024 * 1024) {
+  const padding = payload.endsWith("==") ? 2 : payload.endsWith("=") ? 1 : 0;
+  const decodedSize = (payload.length / 4) * 3 - padding;
+  if (decodedSize > 20 * 1024 * 1024) {
     throw new HTTPException(413, { message: "PDF exceeds the 20 MiB import limit" });
   }
-  const bytes = Uint8Array.from(decoded, (character) => character.codePointAt(0) ?? 0);
+  const bytes = decodeBase64(payload, decodedSize);
   if (new TextDecoder().decode(bytes.subarray(0, 5)) !== "%PDF-") {
     throw new HTTPException(400, { message: "PDF content has an invalid signature" });
   }
@@ -615,6 +624,26 @@ function preparePdf(
       : `${normalizedFilename}.pdf`,
     contentType: "application/pdf",
   };
+}
+
+function decodeBase64(payload: string, decodedSize: number): Uint8Array {
+  const output = new Uint8Array(decodedSize);
+  let outputOffset = 0;
+  try {
+    for (let offset = 0; offset < payload.length; offset += 32_768) {
+      const decoded = atob(payload.slice(offset, offset + 32_768));
+      for (let index = 0; index < decoded.length; index += 1) {
+        output[outputOffset] = decoded.charCodeAt(index);
+        outputOffset += 1;
+      }
+    }
+  } catch {
+    throw new HTTPException(400, { message: "PDF content must be valid base64" });
+  }
+  if (outputOffset !== decodedSize) {
+    throw new HTTPException(400, { message: "PDF content must be valid base64" });
+  }
+  return output;
 }
 
 function looksLikeHtml(content: string, filename: string | undefined): boolean {
