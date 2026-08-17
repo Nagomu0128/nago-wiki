@@ -5,10 +5,11 @@ import {
   type ImportSourceType,
 } from "@nago-wiki/shared";
 import { Hono } from "hono";
-import type { MiddlewareHandler } from "hono";
+import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 
+import { readBoundedImportJson } from "./body";
 import {
   createImportSchema,
   type CreateImportRequest,
@@ -18,6 +19,7 @@ import { safeImportFilename } from "./filename";
 import { exchangeGoogleAuthorizationCode } from "./google-client";
 import { GoogleTokenVault } from "./token-vault";
 import type { ImportWorkflowParams } from "./workflow";
+import { hashMarkdown } from "../core/markdown";
 import { createUuidV7 } from "../core/ids";
 import { createRealtimeWikiCoreService } from "../core/realtime-mutations";
 import type { McpRuntimeEnv } from "../mcp/types";
@@ -50,6 +52,12 @@ interface ImportRow {
   expires_at: string | null;
 }
 
+interface ImportIdempotencyRow {
+  request_hash: string;
+  import_id: string;
+  expires_at: string;
+}
+
 const googleStateSchema = z.object({
   userId: z.string(),
   expectedEmail: z.email(),
@@ -58,16 +66,6 @@ const googleStateSchema = z.object({
 
 export function createImportRoutes(): Hono<ImportApi> {
   const routes = new Hono<ImportApi>();
-  const enforceImportBodyLimit: MiddlewareHandler<ImportApi> = async (
-    context,
-    next,
-  ) => {
-    const length = Number(context.req.header("Content-Length"));
-    if (Number.isFinite(length) && length > 30 * 1024 * 1024) {
-      throw new HTTPException(413, { message: "Import request is too large" });
-    }
-    await next();
-  };
 
   routes.get("/imports/google/authorize", async (context) => {
     const identity = requireImportIdentity(context.get("identity"));
@@ -78,7 +76,8 @@ export function createImportRoutes(): Hono<ImportApi> {
       identity.workspaceId,
     );
     const returnTo = safeReturnUrl(
-      context.req.query("returnTo") ?? `${context.env.MCP_PUBLIC_ORIGIN}/imports`,
+      context.req.query("returnTo") ??
+        `${context.env.MCP_PUBLIC_ORIGIN}/imports`,
       context.env.MCP_PUBLIC_ORIGIN,
     );
     const state = crypto.randomUUID();
@@ -88,9 +87,17 @@ export function createImportRoutes(): Hono<ImportApi> {
       { expirationTtl: 600 },
     );
 
-    const authorizationUrl = new URL("https://accounts.google.com/o/oauth2/v2/auth");
-    authorizationUrl.searchParams.set("client_id", context.env.GOOGLE_CLIENT_ID);
-    authorizationUrl.searchParams.set("redirect_uri", googleCallbackUrl(context.env));
+    const authorizationUrl = new URL(
+      "https://accounts.google.com/o/oauth2/v2/auth",
+    );
+    authorizationUrl.searchParams.set(
+      "client_id",
+      context.env.GOOGLE_CLIENT_ID,
+    );
+    authorizationUrl.searchParams.set(
+      "redirect_uri",
+      googleCallbackUrl(context.env),
+    );
     authorizationUrl.searchParams.set("response_type", "code");
     authorizationUrl.searchParams.set(
       "scope",
@@ -106,13 +113,19 @@ export function createImportRoutes(): Hono<ImportApi> {
     const state = context.req.query("state");
     const code = context.req.query("code");
     if (state === undefined || code === undefined) {
-      throw new HTTPException(400, { message: "Invalid Google OAuth callback" });
+      throw new HTTPException(400, {
+        message: "Invalid Google OAuth callback",
+      });
     }
-    const stored = await context.env.OAUTH_KV.get(`import:google-state:${state}`);
+    const stored = await context.env.OAUTH_KV.get(
+      `import:google-state:${state}`,
+    );
     await context.env.OAUTH_KV.delete(`import:google-state:${state}`);
     const pending = googleStateSchema.safeParse(parseJson(stored));
     if (!pending.success) {
-      throw new HTTPException(400, { message: "Expired Google OAuth callback" });
+      throw new HTTPException(400, {
+        message: "Expired Google OAuth callback",
+      });
     }
     await exchangeGoogleAuthorizationCode(
       context.env,
@@ -126,83 +139,128 @@ export function createImportRoutes(): Hono<ImportApi> {
     return context.redirect(redirect.toString(), 302);
   });
 
-  routes.post(
-    "/imports",
-    enforceImportBodyLimit,
-    zValidator("json", createImportSchema),
-    async (context) => {
-      const identity = requireImportIdentity(context.get("identity"));
-      const userId = identity.id;
-      await requireEditor(context.env.DB, userId, identity.workspaceId);
-      const request = context.req.valid("json");
-      if (request.sourceType === "google_docs") {
-        const vault = new GoogleTokenVault(
-          context.env.OAUTH_KV,
-          context.env.TOKEN_ENCRYPTION_KEY,
-        );
-        if ((await vault.get(userId)) === null) {
-          throw new HTTPException(409, {
-            message: "Connect Google before importing",
-          });
-        }
-      }
-      const importId = createUuidV7();
-      const prepared = await prepareImportSource(
-        context.env,
-        identity.workspaceId,
-        importId,
-        request,
-      );
-      const now = new Date().toISOString();
+  routes.post("/imports", async (context) => {
+    const identity = requireImportIdentity(context.get("identity"));
+    const userId = identity.id;
+    await requireEditor(context.env.DB, userId, identity.workspaceId);
+    const parsedRequest = createImportSchema.safeParse(
+      await readBoundedImportJson(context.req.raw),
+    );
+    if (!parsedRequest.success) {
+      throw new HTTPException(400, { message: "Invalid import request" });
+    }
+    const request = parsedRequest.data;
+    const idempotencyKey = requireImportIdempotencyKey(
+      context.req.header("Idempotency-Key"),
+    );
+    const [keyHash, requestHash] = await Promise.all([
+      hashMarkdown(idempotencyKey),
+      hashMarkdown(JSON.stringify(request)),
+    ]);
+    const now = new Date().toISOString();
+    const existingIdempotency = await getImportIdempotency(
+      context.env.DB,
+      userId,
+      keyHash,
+    );
+    if (existingIdempotency !== null && existingIdempotency.expires_at > now) {
+      return replayImport(context, existingIdempotency, requestHash);
+    }
+    if (existingIdempotency !== null) {
       await context.env.DB.prepare(
-        `INSERT INTO imports (
-           id, workspace_id, user_id, source_type, source_metadata_json,
-           status, created_at, updated_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6, ?6)`,
+        `DELETE FROM import_request_idempotency
+            WHERE user_id = ?1 AND key_hash = ?2 AND expires_at <= ?3`,
       )
-        .bind(
+        .bind(userId, keyHash, now)
+        .run();
+    }
+    if (request.sourceType === "google_docs") {
+      const vault = new GoogleTokenVault(
+        context.env.OAUTH_KV,
+        context.env.TOKEN_ENCRYPTION_KEY,
+      );
+      if ((await vault.get(userId)) === null) {
+        throw new HTTPException(409, {
+          message: "Connect Google before importing",
+        });
+      }
+    }
+    const importId = createUuidV7();
+    const prepared = await prepareImportSource(
+      context.env,
+      identity.workspaceId,
+      importId,
+      request,
+    );
+    try {
+      await context.env.DB.batch([
+        context.env.DB.prepare(
+          `INSERT INTO imports (
+               id, workspace_id, user_id, source_type, source_metadata_json,
+               status, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6, ?6)`,
+        ).bind(
           importId,
           identity.workspaceId,
           userId,
           databaseSourceType(request.sourceType),
           JSON.stringify(prepared.metadata),
           now,
-        )
-        .run();
-
-      const parameters: ImportWorkflowParams = {
-        importId,
-        workspaceId: identity.workspaceId,
-        requestedBy: userId,
-        source: prepared.workflowSource,
-      };
-      try {
-        await context.env.IMPORT_WORKFLOW.create({
-          id: `import-${importId}`,
-          params: parameters,
-          retention: { successRetention: "7 days", errorRetention: "30 days" },
-        });
-      } catch (error) {
-        await context.env.DB.prepare(
-          `UPDATE imports SET status = 'failed', updated_at = ?2 WHERE id = ?1`,
-        )
-          .bind(importId, new Date().toISOString())
-          .run();
-        throw error;
+        ),
+        context.env.DB.prepare(
+          `INSERT INTO import_request_idempotency (
+               user_id, key_hash, request_hash, import_id, created_at, expires_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)`,
+        ).bind(
+          userId,
+          keyHash,
+          requestHash,
+          importId,
+          now,
+          new Date(Date.now() + 86_400_000).toISOString(),
+        ),
+      ]);
+    } catch (error) {
+      await deletePreparedSource(context.env.FILES, prepared.workflowSource);
+      const raced = await getImportIdempotency(context.env.DB, userId, keyHash);
+      if (raced !== null && raced.expires_at > now) {
+        return replayImport(context, raced, requestHash);
       }
-      return context.json(
-        {
-          id: importId,
-          sourceType: request.sourceType,
-          sourceLabel: sourceLabel(prepared.metadata, request.sourceType),
-          status: "queued" as const,
-          warnings: [],
-          createdAt: now,
-        },
-        202,
-      );
-    },
-  );
+      throw error;
+    }
+
+    const parameters: ImportWorkflowParams = {
+      importId,
+      workspaceId: identity.workspaceId,
+      requestedBy: userId,
+      source: prepared.workflowSource,
+    };
+    try {
+      await context.env.IMPORT_WORKFLOW.create({
+        id: `import-${importId}`,
+        params: parameters,
+        retention: { successRetention: "7 days", errorRetention: "30 days" },
+      });
+    } catch (error) {
+      await context.env.DB.prepare(
+        `UPDATE imports SET status = 'failed', updated_at = ?2 WHERE id = ?1`,
+      )
+        .bind(importId, new Date().toISOString())
+        .run();
+      throw error;
+    }
+    return context.json(
+      {
+        id: importId,
+        sourceType: request.sourceType,
+        sourceLabel: sourceLabel(prepared.metadata, request.sourceType),
+        status: "queued" as const,
+        warnings: [],
+        createdAt: now,
+      },
+      202,
+    );
+  });
 
   routes.get("/imports/:id", async (context) => {
     const identity = requireImportIdentity(context.get("identity"));
@@ -225,10 +283,13 @@ export function createImportRoutes(): Hono<ImportApi> {
     if (value.user_id !== userId && member.role !== "owner") {
       throw new HTTPException(404, { message: "Import not found" });
     }
-    const metadata = z.record(z.string(), z.unknown()).catch({}).parse(
-      parseJson(value.source_metadata_json),
+    const metadata = z
+      .record(z.string(), z.unknown())
+      .catch({})
+      .parse(parseJson(value.source_metadata_json));
+    return context.json(
+      await importJobResponse(context.env.FILES, value, metadata),
     );
-    return context.json(await importJobResponse(context.env.FILES, value, metadata));
   });
 
   routes.post(
@@ -251,9 +312,10 @@ export function createImportRoutes(): Hono<ImportApi> {
       if (value.user_id !== identity.id) {
         throw new HTTPException(404, { message: "Import not found" });
       }
-      const metadata = z.record(z.string(), z.unknown()).catch({}).parse(
-        parseJson(value.source_metadata_json),
-      );
+      const metadata = z
+        .record(z.string(), z.unknown())
+        .catch({})
+        .parse(parseJson(value.source_metadata_json));
       if (value.status === "applied" && typeof metadata.pageId === "string") {
         return context.json(
           await createRealtimeWikiCoreService(context.env).getPage(
@@ -263,19 +325,28 @@ export function createImportRoutes(): Hono<ImportApi> {
         );
       }
       if (value.status !== "preview_ready") {
-        throw new HTTPException(409, { message: "Import preview is not ready" });
+        throw new HTTPException(409, {
+          message: "Import preview is not ready",
+        });
       }
-      if (value.expires_at !== null && value.expires_at <= new Date().toISOString()) {
+      if (
+        value.expires_at !== null &&
+        value.expires_at <= new Date().toISOString()
+      ) {
         throw new HTTPException(410, { message: "Import preview has expired" });
       }
       const previewKey =
         typeof metadata.previewKey === "string" ? metadata.previewKey : null;
       if (previewKey === null) {
-        throw new HTTPException(409, { message: "Import preview is unavailable" });
+        throw new HTTPException(409, {
+          message: "Import preview is unavailable",
+        });
       }
       const preview = await context.env.FILES.get(previewKey);
       if (preview === null || preview.size > 1_048_576) {
-        throw new HTTPException(409, { message: "Import preview is unavailable" });
+        throw new HTTPException(409, {
+          message: "Import preview is unavailable",
+        });
       }
       const request = context.req.valid("json");
       const page = await createRealtimeWikiCoreService(context.env).createPage(
@@ -312,7 +383,10 @@ export function createImportRoutes(): Hono<ImportApi> {
           importId,
           identity.id,
           importId,
-          JSON.stringify({ pageId: page.page.id, sourceType: value.source_type }),
+          JSON.stringify({
+            pageId: page.page.id,
+            sourceType: value.source_type,
+          }),
           appliedAt,
         ),
       ]);
@@ -327,6 +401,77 @@ export function createImportRoutes(): Hono<ImportApi> {
   );
 
   return routes;
+}
+
+async function getImportIdempotency(
+  database: D1Database,
+  userId: string,
+  keyHash: string,
+): Promise<ImportIdempotencyRow | null> {
+  return database
+    .prepare(
+      `SELECT request_hash, import_id, expires_at
+         FROM import_request_idempotency
+        WHERE user_id = ?1 AND key_hash = ?2`,
+    )
+    .bind(userId, keyHash)
+    .first<ImportIdempotencyRow>();
+}
+
+async function replayImport(
+  context: Context<ImportApi>,
+  idempotency: ImportIdempotencyRow,
+  requestHash: string,
+): Promise<Response> {
+  if (idempotency.request_hash !== requestHash) {
+    throw importIdempotencyConflict();
+  }
+  const identity = requireImportIdentity(context.get("identity"));
+  const row = await context.env.DB.prepare(
+    `SELECT id, workspace_id, user_id, source_type, source_metadata_json,
+            status, report_r2_key, created_at, updated_at, expires_at
+       FROM imports WHERE id = ?1`,
+  )
+    .bind(idempotency.import_id)
+    .first<ImportRow>();
+  if (
+    row === null ||
+    row.user_id !== identity.id ||
+    row.workspace_id !== identity.workspaceId
+  ) {
+    throw importIdempotencyConflict();
+  }
+  const metadata = z
+    .record(z.string(), z.unknown())
+    .catch({})
+    .parse(parseJson(row.source_metadata_json));
+  return context.json(
+    await importJobResponse(context.env.FILES, row, metadata),
+    200,
+  );
+}
+
+function requireImportIdempotencyKey(value: string | undefined): string {
+  const trimmed = value?.trim() ?? "";
+  if (trimmed.length === 0 || trimmed.length > 200) {
+    throw new HTTPException(400, {
+      message: "Idempotency-Key must contain between 1 and 200 characters",
+    });
+  }
+  return trimmed;
+}
+
+function importIdempotencyConflict(): HTTPException {
+  return new HTTPException(409, {
+    message: "This idempotency key was used with a different import request",
+  });
+}
+
+async function deletePreparedSource(
+  bucket: R2Bucket,
+  source: ImportWorkflowSource,
+): Promise<void> {
+  if ("sourceKey" in source) await bucket.delete(source.sourceKey);
 }
 
 async function requireEditor(
@@ -353,7 +498,8 @@ async function activeMember(
     )
     .bind(userId, workspaceId)
     .first<MemberRow>();
-  if (member === null) throw new HTTPException(401, { message: "Authentication required" });
+  if (member === null)
+    throw new HTTPException(401, { message: "Authentication required" });
   return member;
 }
 
@@ -405,8 +551,10 @@ async function importJobResponse(
   error?: { code: string; message: string };
   createdAt: string;
 }> {
-  const previewKey = typeof metadata.previewKey === "string" ? metadata.previewKey : null;
-  const previewObject = previewKey === null ? null : await bucket.get(previewKey);
+  const previewKey =
+    typeof metadata.previewKey === "string" ? metadata.previewKey : null;
+  const previewObject =
+    previewKey === null ? null : await bucket.get(previewKey);
   const previewMarkdown =
     previewObject === null || previewObject.size > 1_048_576
       ? undefined
@@ -421,7 +569,8 @@ async function importJobResponse(
         ? null
         : await reportObject.json<unknown>(),
     );
-  const errorMessage = typeof metadata.error === "string" ? metadata.error : undefined;
+  const errorMessage =
+    typeof metadata.error === "string" ? metadata.error : undefined;
   const suggestedTitle =
     typeof metadata.title === "string" ? metadata.title : undefined;
   return {
@@ -603,18 +752,26 @@ function preparePdf(
   content: string,
   filename: string,
 ): { bytes: Uint8Array; filename: string; contentType: string } {
-  const payload = content.replace(/^data:application\/pdf;base64,/iu, "").replaceAll(/\s/gu, "");
+  const payload = content
+    .replace(/^data:application\/pdf;base64,/iu, "")
+    .replaceAll(/\s/gu, "");
   if (!/^[A-Za-z\d+/]*={0,2}$/u.test(payload) || payload.length % 4 !== 0) {
-    throw new HTTPException(400, { message: "PDF content must be valid base64" });
+    throw new HTTPException(400, {
+      message: "PDF content must be valid base64",
+    });
   }
   const padding = payload.endsWith("==") ? 2 : payload.endsWith("=") ? 1 : 0;
   const decodedSize = (payload.length / 4) * 3 - padding;
   if (decodedSize > 20 * 1024 * 1024) {
-    throw new HTTPException(413, { message: "PDF exceeds the 20 MiB import limit" });
+    throw new HTTPException(413, {
+      message: "PDF exceeds the 20 MiB import limit",
+    });
   }
   const bytes = decodeBase64(payload, decodedSize);
   if (new TextDecoder().decode(bytes.subarray(0, 5)) !== "%PDF-") {
-    throw new HTTPException(400, { message: "PDF content has an invalid signature" });
+    throw new HTTPException(400, {
+      message: "PDF content has an invalid signature",
+    });
   }
   const normalizedFilename = safeImportFilename(filename);
   return {
@@ -638,10 +795,14 @@ function decodeBase64(payload: string, decodedSize: number): Uint8Array {
       }
     }
   } catch {
-    throw new HTTPException(400, { message: "PDF content must be valid base64" });
+    throw new HTTPException(400, {
+      message: "PDF content must be valid base64",
+    });
   }
   if (outputOffset !== decodedSize) {
-    throw new HTTPException(400, { message: "PDF content must be valid base64" });
+    throw new HTTPException(400, {
+      message: "PDF content must be valid base64",
+    });
   }
   return output;
 }
