@@ -17,7 +17,6 @@ import {
   REALTIME_SUBPROTOCOL,
   REALTIME_TEXT_KEY,
   type ConnectionAttachment,
-  type RealtimeAuthorization,
   type RealtimeControlMessage,
   type RealtimePermission,
 } from "./types";
@@ -34,6 +33,8 @@ export interface PageRoomEnv {
 }
 
 export interface ReplaceMarkdownInput {
+  workspaceId: string;
+  pageId: string;
   bodyMarkdown: string;
   requestedBy: string;
 }
@@ -89,7 +90,10 @@ export class PageRoom extends DurableObject<PageRoomEnv> {
       return new Response("Not Found", { status: 404 });
     }
 
-    const initialized = await this.ensureInitialized(authorization);
+    const initialized = await this.ensureInitialized(
+      authorization.workspaceId,
+      authorization.pageId,
+    );
     if (!initialized) {
       return new Response("Not Found", { status: 404 });
     }
@@ -231,14 +235,24 @@ export class PageRoom extends DurableObject<PageRoomEnv> {
   public async replaceMarkdown(
     input: ReplaceMarkdownInput,
   ): Promise<{ sequence: number }> {
-    if (input.requestedBy.length === 0) {
-      throw new Error("requestedBy is required");
+    if (
+      input.workspaceId.length === 0 ||
+      input.pageId.length === 0 ||
+      input.requestedBy.length === 0
+    ) {
+      throw new Error("workspaceId, pageId, and requestedBy are required");
     }
     if (
       new TextEncoder().encode(input.bodyMarkdown).byteLength >
       MAX_MARKDOWN_BYTES
     ) {
       throw new Error("Markdown exceeds the 1 MiB page limit");
+    }
+    if (!this.roomStorage.ensureIdentity(input.workspaceId, input.pageId)) {
+      throw new Error("PageRoom identity does not match the requested page");
+    }
+    if (!(await this.ensureInitialized(input.workspaceId, input.pageId))) {
+      throw new Error("Page does not exist");
     }
 
     const clone = new Y.Doc();
@@ -296,17 +310,15 @@ export class PageRoom extends DurableObject<PageRoomEnv> {
   }
 
   private async ensureInitialized(
-    authorization: RealtimeAuthorization,
+    workspaceId: string,
+    pageId: string,
   ): Promise<boolean> {
     if (this.roomStorage.getMeta().initialized) {
       return true;
     }
 
     // D1 is external I/O. It intentionally runs outside blockConcurrencyWhile.
-    const current = await this.currentBody.load(
-      authorization.workspaceId,
-      authorization.pageId,
-    );
+    const current = await this.currentBody.load(workspaceId, pageId);
     if (current === null) {
       return false;
     }
