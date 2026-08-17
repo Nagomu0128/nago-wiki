@@ -5,6 +5,7 @@ import {
   computeFlushDeadline,
   computeRetryAt,
   createCompactionSnapshot,
+  realtimeUpdateMetaBindings,
   restoreYDoc,
 } from "../src/realtime/storage";
 
@@ -18,6 +19,11 @@ describe("realtime persistence policy", () => {
     expect(computeRetryAt(10_000, 0)).toBe(11_000);
     expect(computeRetryAt(10_000, 1)).toBe(12_000);
     expect(computeRetryAt(10_000, 8)).toBe(70_000);
+  });
+
+  it("binds flush metadata in SQL column order", () => {
+    expect(realtimeUpdateMetaBindings(1_000, 2_000, 4_000, "user-1", "edit"))
+      .toEqual([1_000, 2_000, 4_000, 2_000, "user-1", "edit"]);
   });
 
   it("compacts applied updates while preserving later updates", () => {

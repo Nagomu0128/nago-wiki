@@ -7,6 +7,10 @@ export function isMcpOAuthPath(path: string): boolean {
   );
 }
 
+export function hasWikiReadScope(scopes: readonly string[]): boolean {
+  return scopes.includes("wiki:read");
+}
+
 export function escapeHtml(value: string): string {
   return value.replace(
     /[&<>"']/gu,

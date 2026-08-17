@@ -9,12 +9,15 @@ const otherWorkspaceId = "00000000-0000-7000-8000-000000000002";
 const memberId = "00000000-0000-7000-8000-000000000010";
 const otherMemberId = "00000000-0000-7000-8000-000000000011";
 const otherPageId = "00000000-0000-7000-8000-000000000020";
+const restrictedParentId = "00000000-0000-7000-8000-000000000021";
+const restrictedChildId = "00000000-0000-7000-8000-000000000022";
 const contentHash = "a".repeat(64);
 
 describe("cross-surface security boundaries", () => {
   beforeEach(async () => {
     await env.DB.batch([
       env.DB.prepare(`DELETE FROM bot_rate_limits`),
+      env.DB.prepare(`UPDATE pages SET parent_id = NULL`),
       env.DB.prepare(`DELETE FROM pages`),
       env.DB.prepare(`DELETE FROM users`),
       env.DB.prepare(`DELETE FROM workspaces WHERE id <> ?1`).bind(
@@ -58,6 +61,63 @@ describe("cross-surface security boundaries", () => {
     );
 
     expect(result).toBeNull();
+  });
+
+  it("requires access to every restricted ancestor before exposing search", async () => {
+    const now = new Date().toISOString();
+    await env.DB.batch([
+      userStatement(memberId, DEFAULT_WORKSPACE_ID, "member@example.com", now),
+      env.DB.prepare(
+        `INSERT INTO pages
+           (id, workspace_id, parent_id, slug, title, body_md, revision,
+            content_hash, access_mode, status, created_by, created_at, updated_at)
+         VALUES (?1, ?2, NULL, 'parent', 'Parent', 'parent secret', 1, ?3,
+                 'restricted', 'active', ?4, ?5, ?5)`,
+      ).bind(restrictedParentId, DEFAULT_WORKSPACE_ID, contentHash, memberId, now),
+      env.DB.prepare(
+        `INSERT INTO pages
+           (id, workspace_id, parent_id, slug, title, body_md, revision,
+            content_hash, access_mode, status, created_by, created_at, updated_at)
+         VALUES (?1, ?2, ?3, 'child', 'Child', 'child secret', 1, ?4,
+                 'restricted', 'active', ?5, ?6, ?6)`,
+      ).bind(
+        restrictedChildId,
+        DEFAULT_WORKSPACE_ID,
+        restrictedParentId,
+        contentHash,
+        memberId,
+        now,
+      ),
+      env.DB.prepare(
+        `INSERT INTO page_acl (page_id, user_id, permission, created_at, updated_at)
+         VALUES (?1, ?2, 'viewer', ?3, ?3)`,
+      ).bind(restrictedChildId, memberId, now),
+    ]);
+    const authorizer = new D1SearchCandidateAuthorizer(
+      env.DB,
+      "https://wiki.example",
+    );
+    const candidate = {
+      chunkId: "child-chunk",
+      key: `w/${DEFAULT_WORKSPACE_ID}/p/${restrictedChildId}.md`,
+      pageId: restrictedChildId,
+      workspaceId: DEFAULT_WORKSPACE_ID,
+      contentHash,
+      text: "child secret",
+      score: 1,
+    };
+
+    await expect(authorizer.authorize(memberId, candidate, {})).resolves.toBeNull();
+
+    await env.DB.prepare(
+      `INSERT INTO page_acl (page_id, user_id, permission, created_at, updated_at)
+       VALUES (?1, ?2, 'viewer', ?3, ?3)`,
+    )
+      .bind(restrictedParentId, memberId, now)
+      .run();
+    await expect(authorizer.authorize(memberId, candidate, {})).resolves.toMatchObject({
+      pageId: restrictedChildId,
+    });
   });
 
   it("limits each bot-linked user to five requests per minute", async () => {

@@ -70,6 +70,16 @@ export function computeRetryAt(now: number, retryCount: number): number {
   return now + delay;
 }
 
+export function realtimeUpdateMetaBindings(
+  firstDirtyAt: number,
+  now: number,
+  nextFlushAt: number,
+  authorId: string,
+  reason: PendingFlush["reason"],
+): [number, number, number, number, string, PendingFlush["reason"]] {
+  return [firstDirtyAt, now, nextFlushAt, now, authorId, reason];
+}
+
 function normalizeReason(value: string): PendingFlush["reason"] {
   return value === "restore" || value === "import" || value === "manual"
     ? value
@@ -260,12 +270,13 @@ export class PageRoomStorage {
              next_flush_at = ?, retry_count = 0, last_activity_at = ?, initialized = 1,
              last_author_id = ?, last_reason = ?
          WHERE id = 1`,
-        firstDirtyAt,
-        now,
-        authorId,
-        reason,
-        nextFlushAt,
-        now,
+        ...realtimeUpdateMetaBindings(
+          firstDirtyAt,
+          now,
+          nextFlushAt,
+          authorId,
+          reason,
+        ),
       );
       return { sequence, nextFlushAt };
     });

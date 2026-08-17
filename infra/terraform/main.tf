@@ -41,7 +41,7 @@ resource "cloudflare_ai_gateway" "wiki" {
   id                         = local.name
   cache_invalidate_on_update = true
   cache_ttl                  = 0
-  collect_logs               = true
+  collect_logs               = false
   log_management             = 10000
   log_management_strategy    = "STOP_INSERTING"
   rate_limiting_interval     = 60

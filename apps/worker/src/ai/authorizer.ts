@@ -43,12 +43,6 @@ export class D1SearchCandidateAuthorizer implements SearchCandidateAuthorizer {
              FROM pages AS parent
              JOIN lineage ON parent.id = lineage.parent_id
             WHERE parent.workspace_id = ?2 AND parent.status = 'active'
-         ),
-         nearest_restriction AS (
-           SELECT id FROM lineage
-            WHERE access_mode = 'restricted'
-            ORDER BY depth ASC
-            LIMIT 1
          )
          SELECT page.id,
                 page.title,
@@ -56,13 +50,15 @@ export class D1SearchCandidateAuthorizer implements SearchCandidateAuthorizer {
                 page.content_hash,
                 CASE
                   WHEN member.role = 'owner' THEN 1
-                  WHEN NOT EXISTS (SELECT 1 FROM nearest_restriction) THEN 1
-                  WHEN EXISTS (
-                    SELECT 1
-                      FROM page_acl
-                     WHERE page_id = (SELECT id FROM nearest_restriction)
-                       AND user_id = ?3
-                       AND permission IN ('viewer', 'editor')
+                  WHEN NOT EXISTS (
+                    SELECT 1 FROM lineage
+                     WHERE access_mode = 'restricted'
+                       AND NOT EXISTS (
+                         SELECT 1 FROM page_acl
+                          WHERE page_acl.page_id = lineage.id
+                            AND page_acl.user_id = ?3
+                            AND page_acl.permission IN ('viewer', 'editor')
+                       )
                   ) THEN 1
                   ELSE 0
                 END AS authorized

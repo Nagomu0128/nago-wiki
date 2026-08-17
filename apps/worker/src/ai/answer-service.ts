@@ -106,7 +106,9 @@ export class WorkersAiAnswerModel implements AnswerModel {
       {
         gateway: {
           id: this.gatewayId,
-          collectLog: true,
+          // Wiki context and answers are private data. Gateway policy controls
+          // rate/spend, but request and response bodies must not be retained.
+          collectLog: false,
           metadata: { feature: "wiki-answer" },
           retries: { maxAttempts: 3, backoff: "exponential" },
         },
