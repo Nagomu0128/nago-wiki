@@ -182,6 +182,21 @@ CREATE TABLE index_state (
 
 CREATE INDEX index_state_status_updated_idx ON index_state(status, updated_at);
 
+CREATE TABLE bot_channel_allowlist (
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  provider TEXT NOT NULL CHECK (provider IN ('discord', 'line')),
+  external_channel_id TEXT NOT NULL CHECK (length(external_channel_id) BETWEEN 1 AND 512),
+  display_name TEXT CHECK (display_name IS NULL OR length(display_name) BETWEEN 1 AND 200),
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+  created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (workspace_id, provider, external_channel_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE INDEX bot_channel_allowlist_provider_enabled_idx
+  ON bot_channel_allowlist(provider, enabled, external_channel_id);
+
 CREATE TABLE bot_events (
   provider TEXT NOT NULL CHECK (provider IN ('discord', 'line')),
   event_id TEXT NOT NULL,
