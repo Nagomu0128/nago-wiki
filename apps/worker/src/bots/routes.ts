@@ -5,7 +5,11 @@ import { z } from "zod";
 
 import { issueAccountLinkCode } from "./account-link";
 import { handleLineWebhook } from "./line";
-import { answerBotQuery, reserveBotEvent } from "./service";
+import {
+  answerBotQuery,
+  BotEventInProgressError,
+  reserveBotEvent,
+} from "./service";
 import { verifyBridgeSignature } from "./signatures";
 import type { McpRuntimeEnv } from "../mcp/types";
 
@@ -64,11 +68,20 @@ export function createBotRoutes(): Hono<BotApi> {
     if (!verified) throw new HTTPException(401, { message: "Invalid bridge signature" });
     const request = discordQuerySchema.safeParse(parseJson(body));
     if (!request.success) throw new HTTPException(400, { message: "Invalid bot query" });
-    if (!(await reserveBotEvent(context.env.DB, "discord", request.data.eventId))) {
-      return context.json({ duplicate: true as const }, 202);
+    await reserveBotEvent(context.env.DB, "discord", request.data.eventId);
+    try {
+      const answer = await answerBotQuery(context.env, request.data);
+      return context.json({ answer });
+    } catch (error) {
+      if (error instanceof BotEventInProgressError) {
+        return context.json(
+          { pending: true as const },
+          202,
+          { "Retry-After": "1" },
+        );
+      }
+      throw error;
     }
-    const answer = await answerBotQuery(context.env, request.data);
-    return context.json({ answer });
   });
 
   return routes;

@@ -224,9 +224,16 @@ CREATE TABLE bot_events (
   response_text TEXT CHECK (
     response_text IS NULL OR length(CAST(response_text AS BLOB)) <= 16384
   ),
+  processing_token TEXT,
+  processing_expires_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   PRIMARY KEY (provider, event_id)
+  ,CHECK (
+    (status = 'processing' AND processing_token IS NOT NULL AND processing_expires_at IS NOT NULL)
+    OR
+    (status <> 'processing' AND processing_token IS NULL AND processing_expires_at IS NULL)
+  )
 ) STRICT, WITHOUT ROWID;
 
 CREATE INDEX bot_events_created_idx ON bot_events(created_at);

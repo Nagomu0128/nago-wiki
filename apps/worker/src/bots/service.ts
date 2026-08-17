@@ -26,6 +26,19 @@ interface BotEventReplayRow {
   response_text: string | null;
 }
 
+interface ProcessingClaimRow {
+  processing_token: string;
+}
+
+const BOT_PROCESSING_LEASE_MS = 5 * 60 * 1_000;
+
+export class BotEventInProgressError extends Error {
+  public constructor() {
+    super("This bot event is already being processed");
+    this.name = "BotEventInProgressError";
+  }
+}
+
 export async function reserveBotEvent(
   database: D1Database,
   provider: BotQueryInput["provider"],
@@ -61,6 +74,17 @@ export async function answerBotQuery(
     .first<BotEventReplayRow>();
   if (replay?.status === "completed") return replay.response_text;
   if (replay?.status === "ignored") return null;
+  const processingToken = await claimBotEvent(
+    environment.DB,
+    input.provider,
+    input.eventId,
+  );
+  if (processingToken === null) {
+    const latest = await readBotEvent(environment.DB, input.provider, input.eventId);
+    if (latest?.status === "completed") return latest.response_text;
+    if (latest?.status === "ignored") return null;
+    throw new BotEventInProgressError();
+  }
 
   const workspaceId = await resolveWorkspace(
     environment.DB,
@@ -68,7 +92,14 @@ export async function answerBotQuery(
     input.externalChannelId,
   );
   if (workspaceId === null) {
-    await finishEvent(environment.DB, input, null, "ignored", null);
+    await finishEvent(
+      environment.DB,
+      input,
+      processingToken,
+      null,
+      "ignored",
+      null,
+    );
     return null;
   }
 
@@ -88,7 +119,14 @@ export async function answerBotQuery(
       input.provider,
       input.externalUserId,
     );
-    await finishEvent(environment.DB, input, userId, "completed", response);
+    await finishEvent(
+      environment.DB,
+      input,
+      processingToken,
+      userId,
+      "completed",
+      response,
+    );
     return response;
   }
 
@@ -100,20 +138,27 @@ export async function answerBotQuery(
   if (userId === null) {
     const response =
       "Wikiアカウントが未連携です。Wikiのアカウント連携画面でコードを発行し、「link <コード>」と送信してください。";
-    await finishEvent(environment.DB, input, null, "completed", response);
+    await finishEvent(
+      environment.DB,
+      input,
+      processingToken,
+      null,
+      "completed",
+      response,
+    );
     return response;
   }
 
-  await environment.DB.prepare(
-    `UPDATE bot_events SET user_id = ?3, status = 'processing', updated_at = ?4
-      WHERE provider = ?1 AND event_id = ?2`,
-  )
-    .bind(input.provider, input.eventId, userId, new Date().toISOString())
-    .run();
-
   if (!(await consumeBotRateLimit(environment.DB, userId, workspaceId))) {
     const response = "利用が集中しています。1分ほど待ってから、もう一度お試しください。";
-    await finishEvent(environment.DB, input, userId, "completed", response);
+    await finishEvent(
+      environment.DB,
+      input,
+      processingToken,
+      userId,
+      "completed",
+      response,
+    );
     return response;
   }
 
@@ -146,10 +191,24 @@ export async function answerBotQuery(
       answerSummary: result.answer,
     });
     const response = formatBotAnswer(result.answer, result.citations);
-    await finishEvent(environment.DB, input, userId, "completed", response);
+    await finishEvent(
+      environment.DB,
+      input,
+      processingToken,
+      userId,
+      "completed",
+      response,
+    );
     return response;
   } catch (error) {
-    await finishEvent(environment.DB, input, userId, "failed", null);
+    await finishEvent(
+      environment.DB,
+      input,
+      processingToken,
+      userId,
+      "failed",
+      null,
+    );
     throw error;
   }
 }
@@ -221,17 +280,19 @@ async function resolveWorkspace(
 async function finishEvent(
   database: D1Database,
   input: BotQueryInput,
+  processingToken: string,
   userId: string | null,
   status: "completed" | "failed" | "ignored",
   response: string | null,
 ): Promise<void> {
   const responseHash = response === null ? null : await sha256Hex(response);
-  await database
+  const updated = await database
     .prepare(
       `UPDATE bot_events
           SET user_id = ?3, status = ?4, response_hash = ?5,
-              response_text = ?6, updated_at = ?7
-        WHERE provider = ?1 AND event_id = ?2`,
+              response_text = ?6, processing_token = NULL,
+              processing_expires_at = NULL, updated_at = ?7
+        WHERE provider = ?1 AND event_id = ?2 AND processing_token = ?8`,
     )
     .bind(
       input.provider,
@@ -241,8 +302,49 @@ async function finishEvent(
       responseHash,
       response,
       new Date().toISOString(),
+      processingToken,
     )
     .run();
+  if (updated.meta.changes !== 1) throw new BotEventInProgressError();
+}
+
+export async function claimBotEvent(
+  database: D1Database,
+  provider: BotQueryInput["provider"],
+  eventId: string,
+  now = new Date(),
+): Promise<string | null> {
+  const token = crypto.randomUUID();
+  const expiresAt = new Date(now.getTime() + BOT_PROCESSING_LEASE_MS).toISOString();
+  const claimed = await database
+    .prepare(
+      `UPDATE bot_events
+          SET status = 'processing', processing_token = ?3,
+              processing_expires_at = ?4, updated_at = ?5
+        WHERE provider = ?1 AND event_id = ?2
+          AND (
+            status IN ('received', 'failed')
+            OR (status = 'processing' AND processing_expires_at <= ?5)
+          )
+        RETURNING processing_token`,
+    )
+    .bind(provider, eventId, token, expiresAt, now.toISOString())
+    .first<ProcessingClaimRow>();
+  return claimed?.processing_token ?? null;
+}
+
+async function readBotEvent(
+  database: D1Database,
+  provider: BotQueryInput["provider"],
+  eventId: string,
+): Promise<BotEventReplayRow | null> {
+  return database
+    .prepare(
+      `SELECT status, response_text FROM bot_events
+        WHERE provider = ?1 AND event_id = ?2`,
+    )
+    .bind(provider, eventId)
+    .first<BotEventReplayRow>();
 }
 
 function parseLinkCode(query: string): string | null {

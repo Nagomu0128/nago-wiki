@@ -103,33 +103,76 @@ async function handleMessage(
     externalChannelId: isDirectMessage ? null : message.channelId,
     query,
   });
-  const timestamp = String(Math.floor(Date.now() / 1_000));
-  const signature = createHmac("sha256", configuration.bridgeSecret)
-    .update(`${timestamp}.${body}`)
-    .digest("hex");
-  const response = await fetch(
+  const response = await fetchBridgeWithRetry(
     new URL("/api/v1/internal/bot-query", configuration.workerUrl),
-    {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-nago-timestamp": timestamp,
-        "x-nago-signature": signature,
-      },
-      body,
-    },
+    body,
+    configuration.bridgeSecret,
   );
   if (!response.ok) {
     throw new Error(`Wiki bridge failed with status ${String(response.status)}`);
   }
   const result = parseBridgeResponse(await response.json());
-  if (result.answer === null || result.duplicate === true) return;
+  if (result.answer === null) return;
   const [first, ...rest] = splitDiscordMessage(result.answer);
   if (first === undefined) return;
   await message.reply({ content: first, allowedMentions: { parse: [] } });
   for (const chunk of rest) {
     await message.channel.send({ content: chunk, allowedMentions: { parse: [] } });
   }
+}
+
+export async function fetchBridgeWithRetry(
+  url: URL,
+  body: string,
+  bridgeSecret: string,
+  options: {
+    timeoutMs?: number;
+    sleep?: (delayMs: number) => Promise<void>;
+  } = {},
+): Promise<Response> {
+  const deadline = Date.now() + (options.timeoutMs ?? 60_000);
+  const sleep = options.sleep ?? ((delayMs: number) => new Promise<void>((resolve) => {
+    setTimeout(resolve, delayMs);
+  }));
+  let lastError: unknown;
+  while (Date.now() < deadline) {
+    const timestamp = String(Math.floor(Date.now() / 1_000));
+    const signature = createHmac("sha256", bridgeSecret)
+      .update(`${timestamp}.${body}`)
+      .digest("hex");
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-nago-timestamp": timestamp,
+          "x-nago-signature": signature,
+        },
+        body,
+        signal: AbortSignal.timeout(
+          Math.max(1, Math.min(15_000, deadline - Date.now())),
+        ),
+      });
+      if (response.status !== 202 && response.status < 500) return response;
+      lastError = new Error(`Wiki bridge is not ready (${String(response.status)})`);
+      const retryAfterHeader = response.headers.get("retry-after");
+      const retryAfter = retryAfterHeader === null
+        ? Number.NaN
+        : Number(retryAfterHeader);
+      const delayMs = Number.isFinite(retryAfter)
+        ? Math.max(0, Math.min(5_000, retryAfter * 1_000))
+        : 1_000;
+      if (Date.now() + delayMs >= deadline) break;
+      await sleep(delayMs);
+    } catch (error) {
+      lastError = error;
+      if (Date.now() + 1_000 >= deadline) break;
+      await sleep(1_000);
+    }
+  }
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("Wiki bridge retry budget was exhausted");
 }
 
 function parseBridgeResponse(value: unknown): BridgeResponse {
