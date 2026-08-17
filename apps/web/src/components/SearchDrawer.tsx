@@ -32,8 +32,10 @@ export function SearchDrawer({ api, mode, onModeChange, onSelectPage }: SearchDr
   const submit = () => {
     const value = query.trim();
     if (!value) return;
-    if (mode === "search") void search.mutate({ query: value, mode: searchMode });
-    else void answer.mutate({ query: value, knowledgeMode });
+    const request = mode === "search"
+      ? search.mutate({ query: value, mode: searchMode })
+      : answer.mutate({ query: value, knowledgeMode });
+    void request.catch(() => undefined);
   };
 
   return (

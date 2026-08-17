@@ -3,6 +3,7 @@ import "@milkdown/crepe/theme/frame.css";
 import type { Plugin } from "@milkdown/kit/prose/state";
 import { $prose, replaceAll } from "@milkdown/kit/utils";
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
+import type { ForwardRefExoticComponent, RefAttributes } from "react";
 import { ySyncPlugin } from "y-prosemirror";
 import * as Y from "yjs";
 import { RevisionConflictFailure, type PageResource, type WikiApi } from "../api";
@@ -23,12 +24,14 @@ export interface EditorSurfaceHandle {
   setMarkdown(markdown: string): void;
 }
 
-interface CrepeSurfaceProps {
+export interface CrepeSurfaceProps {
   document: Y.Doc;
   initialMarkdown: string;
   onMarkdownChange: (markdown: string) => void;
   readOnly: boolean;
 }
+
+export type EditorSurfaceComponent = ForwardRefExoticComponent<CrepeSurfaceProps & RefAttributes<EditorSurfaceHandle>>;
 
 const CrepeSurface = forwardRef<EditorSurfaceHandle, CrepeSurfaceProps>(function CrepeSurface(
   { document, initialMarkdown, onMarkdownChange, readOnly },
@@ -98,6 +101,7 @@ interface KnowledgeEditorProps {
   onSaved?: (resource: PageResource) => void;
   onOpenComments?: () => void;
   onOpenVersions?: () => void;
+  surfaceComponent?: EditorSurfaceComponent;
 }
 
 const saveLabels: Record<SaveStatus, string> = {
@@ -117,6 +121,7 @@ export function KnowledgeEditor({
   onSaved,
   onOpenComments,
   onOpenVersions,
+  surfaceComponent: Surface = CrepeSurface,
 }: KnowledgeEditorProps) {
   const [mode, setMode] = useState<EditorMode>("visual");
   const [title, setTitle] = useState(resource.page.title);
@@ -327,7 +332,7 @@ export function KnowledgeEditor({
 
       <div className="editor-canvas">
         <div hidden={mode !== "visual"}>
-          <CrepeSurface
+          <Surface
             document={document}
             initialMarkdown={resource.page.bodyMd}
             onMarkdownChange={markChanged}
