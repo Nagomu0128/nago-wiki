@@ -1,13 +1,16 @@
 import { Crepe } from "@milkdown/crepe";
 import "@milkdown/crepe/theme/frame.css";
-import type { Plugin } from "@milkdown/kit/prose/state";
-import { $prose, replaceAll } from "@milkdown/kit/utils";
+import { replaceAll } from "@milkdown/kit/utils";
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import type { ForwardRefExoticComponent, RefAttributes } from "react";
-import { ySyncPlugin } from "y-prosemirror";
 import * as Y from "yjs";
 import { RevisionConflictFailure, type PageResource, type WikiApi } from "../api";
-import type { RealtimeProviderFactory, RealtimeStatus } from "../realtime";
+import {
+  localMarkdownOrigin,
+  replaceSharedMarkdown,
+  type RealtimeProviderFactory,
+  type RealtimeStatus,
+} from "../realtime";
 import {
   completeWikiLink,
   createApiWikiLinkSuggestionProvider,
@@ -28,22 +31,26 @@ export interface CrepeSurfaceProps {
   document: Y.Doc;
   initialMarkdown: string;
   onMarkdownChange: (markdown: string) => void;
+  onRemoteMarkdownChange?: (markdown: string) => void;
   readOnly: boolean;
 }
 
 export type EditorSurfaceComponent = ForwardRefExoticComponent<CrepeSurfaceProps & RefAttributes<EditorSurfaceHandle>>;
 
 const CrepeSurface = forwardRef<EditorSurfaceHandle, CrepeSurfaceProps>(function CrepeSurface(
-  { document, initialMarkdown, onMarkdownChange, readOnly },
+  { document, initialMarkdown, onMarkdownChange, onRemoteMarkdownChange, readOnly },
   ref,
 ) {
   const rootRef = useRef<HTMLDivElement>(null);
   const crepeRef = useRef<Crepe | null>(null);
   const onMarkdownChangeRef = useRef(onMarkdownChange);
+  const onRemoteMarkdownChangeRef = useRef(onRemoteMarkdownChange);
   const initialMarkdownRef = useRef(initialMarkdown);
   const readOnlyRef = useRef(readOnly);
+  const applyingRemoteRef = useRef(false);
 
   useEffect(() => { onMarkdownChangeRef.current = onMarkdownChange; }, [onMarkdownChange]);
+  useEffect(() => { onRemoteMarkdownChangeRef.current = onRemoteMarkdownChange; }, [onRemoteMarkdownChange]);
 
   useImperativeHandle(ref, () => ({
     getMarkdown: () => crepeRef.current?.getMarkdown() ?? initialMarkdownRef.current,
@@ -66,11 +73,20 @@ const CrepeSurface = forwardRef<EditorSurfaceHandle, CrepeSurfaceProps>(function
         [Crepe.Feature.Placeholder]: { text: "考えを書き始める…" },
       },
     });
-    const syncPlugin = ySyncPlugin(document.getXmlFragment("prosemirror")) as Plugin;
-    crepe.editor.use($prose(() => syncPlugin));
+    const sharedMarkdown = document.getText("markdown");
+    const applySharedMarkdown = (_event: Y.YTextEvent, transaction: Y.Transaction) => {
+      if (transaction.origin === localMarkdownOrigin || !crepeRef.current) return;
+      const nextMarkdown = sharedMarkdown.toJSON();
+      if (crepeRef.current.getMarkdown() === nextMarkdown) return;
+      applyingRemoteRef.current = true;
+      crepeRef.current.editor.action(replaceAll(nextMarkdown));
+      applyingRemoteRef.current = false;
+      onRemoteMarkdownChangeRef.current?.(nextMarkdown);
+    };
+    sharedMarkdown.observe(applySharedMarkdown);
     crepe.on((listener) => {
       listener.markdownUpdated((_context, markdown, previousMarkdown) => {
-        if (markdown !== previousMarkdown) onMarkdownChangeRef.current(markdown);
+        if (!applyingRemoteRef.current && markdown !== previousMarkdown) onMarkdownChangeRef.current(markdown);
       });
     });
     void crepe.create().then(() => {
@@ -83,6 +99,7 @@ const CrepeSurface = forwardRef<EditorSurfaceHandle, CrepeSurfaceProps>(function
     });
     return () => {
       disposed = true;
+      sharedMarkdown.unobserve(applySharedMarkdown);
       crepeRef.current = null;
       void crepe.destroy();
     };
@@ -175,11 +192,19 @@ export function KnowledgeEditor({
   }, [suggestions, wikiQuery]);
 
   const markChanged = useCallback((nextMarkdown: string) => {
+    replaceSharedMarkdown(document, nextMarkdown);
     editGenerationRef.current += 1;
     setMarkdown(nextMarkdown);
     setSourceMarkdown(nextMarkdown);
-    setSaveStatus("dirty");
+    setSaveStatus(realtimeStatus === "connected" ? "saved" : "dirty");
     setSaveError(null);
+    setWikiQuery(extractWikiLinkQuery(nextMarkdown));
+  }, [document, realtimeStatus]);
+
+  const acceptRemoteMarkdown = useCallback((nextMarkdown: string) => {
+    editGenerationRef.current += 1;
+    setMarkdown(nextMarkdown);
+    setSourceMarkdown(nextMarkdown);
     setWikiQuery(extractWikiLinkQuery(nextMarkdown));
   }, []);
 
@@ -189,7 +214,11 @@ export function KnowledgeEditor({
     setSaveStatus("saving");
     setSaveError(null);
     try {
-      const updated = await api.updatePage(resource.page.id, { baseRevision, title, bodyMd: markdown });
+      const updated = await api.updatePage(resource.page.id, {
+        baseRevision,
+        title,
+        ...(realtimeStatus === "connected" ? {} : { bodyMd: markdown }),
+      });
       setRevision(updated.page.revision);
       setConflict(null);
       setSaveStatus(editGenerationRef.current === generation ? "saved" : "dirty");
@@ -212,7 +241,7 @@ export function KnowledgeEditor({
         setSaveStatus("error");
       }
     }
-  }, [api, markdown, onSaved, readOnly, resource.page.id, revision, title]);
+  }, [api, markdown, onSaved, readOnly, realtimeStatus, resource.page.id, revision, title]);
 
   useEffect(() => {
     if (saveStatus !== "dirty") return;
@@ -288,6 +317,7 @@ export function KnowledgeEditor({
     setMarkdown(latest.page.bodyMd);
     setSourceMarkdown(latest.page.bodyMd);
     setRevision(latest.page.revision);
+    replaceSharedMarkdown(document, latest.page.bodyMd);
     surfaceRef.current?.setMarkdown(latest.page.bodyMd);
     setConflict(null);
     setSaveStatus("saved");
@@ -355,6 +385,7 @@ export function KnowledgeEditor({
             document={document}
             initialMarkdown={resource.page.bodyMd}
             onMarkdownChange={markChanged}
+            onRemoteMarkdownChange={acceptRemoteMarkdown}
             readOnly={readOnly}
             ref={surfaceRef}
           />

@@ -29,15 +29,19 @@ function writeVarUint(value: number, target: number[]) {
 
 function writeBytes(value: Uint8Array, target: number[]) {
   writeVarUint(value.byteLength, target);
-  target.push(...value);
+  for (const byte of value) target.push(byte);
 }
 
-function encodeSyncMessage(syncType: 0 | 1 | 2, payload: Uint8Array) {
+export function encodeSyncMessage(syncType: 0 | 1 | 2, payload: Uint8Array) {
   const target: number[] = [];
   writeVarUint(0, target);
   writeVarUint(syncType, target);
   writeBytes(payload, target);
   return new Uint8Array(target);
+}
+
+export function isTerminalCloseCode(code: number) {
+  return code === 1000 || code === 4400 || code === 4401 || code === 4403;
 }
 
 function readVarUint(data: Uint8Array, cursor: { value: number }) {
@@ -127,14 +131,17 @@ export class NativeYjsRealtimeSession implements RealtimeSession {
     socket.addEventListener("open", () => {
       if (this.socket !== socket) return;
       this.reconnectAttempt = 0;
-      this.setStatus("connected");
       this.send(encodeSyncMessage(0, Y.encodeStateVector(this.document)));
     });
     socket.addEventListener("message", (event) => { void this.handleMessage(event.data); });
     socket.addEventListener("error", () => { this.setStatus("error"); });
     socket.addEventListener("close", (event) => {
-      if (this.socket !== socket || this.destroyed || event.code === 1000) return;
+      if (this.socket !== socket || this.destroyed) return;
       this.socket = null;
+      if (isTerminalCloseCode(event.code)) {
+        this.setStatus(event.code === 1000 ? "disconnected" : "error");
+        return;
+      }
       this.scheduleReconnect();
     });
   }
@@ -159,6 +166,7 @@ export class NativeYjsRealtimeSession implements RealtimeSession {
         if (this.currentPermission !== "viewer") this.send(encodeSyncMessage(1, Y.encodeStateAsUpdate(this.document, payload)));
       } else if (syncType === 1 || syncType === 2) {
         Y.applyUpdate(this.document, payload, remoteOrigin);
+        if (syncType === 1) this.setStatus("connected");
       }
     } catch {
       this.setStatus("error");
