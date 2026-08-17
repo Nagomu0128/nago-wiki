@@ -96,6 +96,14 @@ const CrepeSurface = forwardRef<EditorSurfaceHandle, CrepeSurfaceProps>(function
       }
       crepeRef.current = crepe;
       crepe.setReadonly(readOnlyRef.current);
+      const editor = rootRef.current?.querySelector<HTMLElement>("[contenteditable='true']");
+      editor?.setAttribute("aria-label", "Markdown本文");
+      rootRef.current?.querySelectorAll<HTMLElement>("button:not([aria-label])").forEach((button) => {
+        if (!button.textContent.trim()) button.setAttribute("aria-label", "エディター操作");
+      });
+      rootRef.current?.querySelectorAll<HTMLElement>("a:not([aria-label])").forEach((link) => {
+        if (!link.textContent.trim()) link.setAttribute("aria-label", "本文内のリンク");
+      });
     });
     return () => {
       disposed = true;
@@ -110,7 +118,7 @@ const CrepeSurface = forwardRef<EditorSurfaceHandle, CrepeSurfaceProps>(function
     crepeRef.current?.setReadonly(readOnly);
   }, [readOnly]);
 
-  return <div aria-label="ビジュアルMarkdownエディター" className="crepe-surface" ref={rootRef} />;
+  return <div aria-label="ビジュアルMarkdownエディター" className="crepe-surface" ref={rootRef} role="group" />;
 });
 
 interface KnowledgeEditorProps {
@@ -164,6 +172,7 @@ export function KnowledgeEditor({
   const document = useMemo(() => new Y.Doc(), []);
   const surfaceRef = useRef<EditorSurfaceHandle>(null);
   const sourceRef = useRef<HTMLTextAreaElement>(null);
+  const conflictDialogRef = useRef<HTMLDivElement>(null);
   const editGenerationRef = useRef(0);
   const suggestions = useMemo(() => suggestionProvider ?? createApiWikiLinkSuggestionProvider(api), [api, suggestionProvider]);
   const readOnly = permission === "viewer";
@@ -194,6 +203,33 @@ export function KnowledgeEditor({
     });
     return () => { controller.abort(); };
   }, [suggestions, wikiQuery]);
+
+  useEffect(() => {
+    if (!conflict) return;
+    const dialog = conflictDialogRef.current;
+    if (!dialog) return;
+    const previousFocus = globalThis.document.activeElement instanceof HTMLElement ? globalThis.document.activeElement : null;
+    const focusable = [...dialog.querySelectorAll<HTMLElement>("button:not(:disabled), [href], input:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex='-1'])")];
+    focusable[0]?.focus();
+    const trapFocus = (event: KeyboardEvent) => {
+      if (event.key !== "Tab" || focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable.at(-1);
+      if (!first || !last) return;
+      if (event.shiftKey && globalThis.document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && globalThis.document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    dialog.addEventListener("keydown", trapFocus);
+    return () => {
+      dialog.removeEventListener("keydown", trapFocus);
+      previousFocus?.focus();
+    };
+  }, [conflict]);
 
   const markChanged = useCallback((nextMarkdown: string) => {
     replaceSharedMarkdown(document, nextMarkdown);
@@ -434,11 +470,11 @@ export function KnowledgeEditor({
       </div>
 
       {conflict && (
-        <div aria-labelledby="conflict-title" aria-modal="true" className="conflict-dialog" role="dialog">
+        <div aria-describedby="conflict-description" aria-labelledby="conflict-title" aria-modal="true" className="conflict-dialog" ref={conflictDialogRef} role="dialog">
           <div>
             <span className="conflict-mark">!</span>
             <h2 id="conflict-title">別の編集が先に保存されました</h2>
-            <p>自分の変更は失われていません。最新版を読み込むか、最新版のrevisionを基準に自分の内容を再保存してください。</p>
+            <p id="conflict-description">自分の変更は失われていません。最新版を読み込むか、最新版のrevisionを基準に自分の内容を再保存してください。</p>
             {conflict.latest && <div className="conflict-summary"><span>サーバー</span><strong>rev. {conflict.latest.page.revision}</strong><span>自分</span><strong>rev. {revision} から編集</strong></div>}
             <div className="dialog-actions">
               <button className="button" disabled={!conflict.latest} onClick={loadLatest} type="button">最新版を読み込む</button>
