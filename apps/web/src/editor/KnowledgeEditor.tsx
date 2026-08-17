@@ -40,22 +40,24 @@ const CrepeSurface = forwardRef<EditorSurfaceHandle, CrepeSurfaceProps>(function
   const rootRef = useRef<HTMLDivElement>(null);
   const crepeRef = useRef<Crepe | null>(null);
   const onMarkdownChangeRef = useRef(onMarkdownChange);
+  const initialMarkdownRef = useRef(initialMarkdown);
+  const readOnlyRef = useRef(readOnly);
 
   useEffect(() => { onMarkdownChangeRef.current = onMarkdownChange; }, [onMarkdownChange]);
 
   useImperativeHandle(ref, () => ({
-    getMarkdown: () => crepeRef.current?.getMarkdown() ?? initialMarkdown,
+    getMarkdown: () => crepeRef.current?.getMarkdown() ?? initialMarkdownRef.current,
     setMarkdown: (markdown) => {
       crepeRef.current?.editor.action(replaceAll(markdown));
     },
-  }), [initialMarkdown]);
+  }), []);
 
   useEffect(() => {
     if (!rootRef.current) return;
     let disposed = false;
     const crepe = new Crepe({
       root: rootRef.current,
-      defaultValue: initialMarkdown,
+      defaultValue: initialMarkdownRef.current,
       features: {
         [Crepe.Feature.AI]: false,
         [Crepe.Feature.TopBar]: false,
@@ -77,16 +79,17 @@ const CrepeSurface = forwardRef<EditorSurfaceHandle, CrepeSurfaceProps>(function
         return;
       }
       crepeRef.current = crepe;
-      crepe.setReadonly(readOnly);
+      crepe.setReadonly(readOnlyRef.current);
     });
     return () => {
       disposed = true;
       crepeRef.current = null;
       void crepe.destroy();
     };
-  }, [document, initialMarkdown, readOnly]);
+  }, [document]);
 
   useEffect(() => {
+    readOnlyRef.current = readOnly;
     crepeRef.current?.setReadonly(readOnly);
   }, [readOnly]);
 

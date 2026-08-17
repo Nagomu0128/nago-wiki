@@ -51,8 +51,8 @@ const realtimeFactory: RealtimeProviderFactory = {
   },
 };
 
-function apiWithUpdate(updatePage: WikiApi["updatePage"]) {
-  return { updatePage } as unknown as WikiApi;
+function apiWithUpdate(updatePage: WikiApi["updatePage"], getPage: WikiApi["getPage"] = vi.fn(() => Promise.resolve(resource))) {
+  return { getPage, updatePage } as unknown as WikiApi;
 }
 
 describe("KnowledgeEditor", () => {
@@ -82,7 +82,11 @@ describe("KnowledgeEditor", () => {
   it("keeps local content and opens conflict resolution on a stale baseRevision", async () => {
     vi.useFakeTimers();
     const latest: PageResource = { ...resource, page: { ...resource.page, revision: 4, bodyMd: "# サーバー版" } };
-    const api = apiWithUpdate(vi.fn(() => Promise.reject(new RevisionConflictFailure("stale", "req-conflict", latest))));
+    const getPage = vi.fn(() => Promise.resolve(latest));
+    const api = apiWithUpdate(
+      vi.fn(() => Promise.reject(new RevisionConflictFailure("stale", "req-conflict"))),
+      getPage,
+    );
     view = await renderView(<KnowledgeEditor api={api} realtimeFactory={realtimeFactory} resource={resource} surfaceComponent={TestSurface} />);
     const title = view.container.querySelector<HTMLInputElement>("[aria-label='ページタイトル']");
     if (!title) throw new Error("Title input was not rendered");
@@ -92,5 +96,6 @@ describe("KnowledgeEditor", () => {
 
     expect(view.container.querySelector("[role='dialog']")?.textContent).toContain("別の編集が先に保存されました");
     expect(view.container.textContent).toContain("rev. 4");
+    expect(getPage).toHaveBeenCalledWith(resource.page.id);
   });
 });
