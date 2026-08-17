@@ -49,6 +49,94 @@
       "max_instances": 1
     }
   ],
+  "env": {
+    "production": {
+      "name": "nago-wiki-prod",
+      "vars": {
+        "ENVIRONMENT": "production",
+        "AI_GATEWAY_ID": "nago-wiki-prod",
+        "ANSWER_MODEL": "@cf/zai-org/glm-4.7-flash",
+        "DEFAULT_KNOWLEDGE_MODE": "wiki_plus_general",
+        "ACCESS_AUDIENCE": "configure-before-deploy",
+        "ACCESS_ISSUER": "https://configure.cloudflareaccess.com",
+        "ALLOW_DEVELOPMENT_IDENTITY": "false",
+        "WORKSPACE_ID": "00000000-0000-7000-8000-000000000001",
+        "GOOGLE_CLIENT_ID": "configure-before-deploy",
+        "MCP_PUBLIC_ORIGIN": "https://configure-before-deploy.example",
+        "WORKER_INTERNAL_URL": "https://configure-before-deploy.example"
+      },
+      "kv_namespaces": [
+        {
+          "binding": "OAUTH_KV",
+          "id": "00000000000000000000000000000000"
+        }
+      ],
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "nago-wiki-prod",
+          "database_id": "00000000-0000-0000-0000-000000000000",
+          "migrations_dir": "../../migrations"
+        }
+      ],
+      "r2_buckets": [
+        {
+          "binding": "FILES",
+          "bucket_name": "nago-wiki-prod-files"
+        }
+      ],
+      "ai": { "binding": "AI" },
+      "ai_search": [
+        {
+          "binding": "WIKI_SEARCH",
+          "instance_name": "nago-wiki-prod"
+        }
+      ],
+      "queues": {
+        "producers": [
+          {
+            "binding": "ASYNC_JOBS",
+            "queue": "nago-wiki-prod-jobs"
+          }
+        ],
+        "consumers": [
+          {
+            "queue": "nago-wiki-prod-jobs",
+            "max_batch_size": 10,
+            "max_batch_timeout": 5,
+            "max_retries": 5,
+            "dead_letter_queue": "nago-wiki-prod-jobs-dlq"
+          }
+        ]
+      },
+      "workflows": [
+        {
+          "name": "nago-wiki-import-prod",
+          "binding": "IMPORT_WORKFLOW",
+          "class_name": "ImportWorkflow"
+        }
+      ],
+      "durable_objects": {
+        "bindings": [
+          { "name": "PAGE_ROOM", "class_name": "PageRoom" },
+          {
+            "name": "DISCORD_GATEWAY",
+            "class_name": "DiscordGatewayContainer"
+          }
+        ]
+      },
+      "containers": [
+        {
+          "name": "nago-wiki-discord-prod",
+          "class_name": "DiscordGatewayContainer",
+          "image": "../discord-bot/Dockerfile",
+          "image_build_context": "../..",
+          "instance_type": "lite",
+          "max_instances": 1
+        }
+      ]
+    }
+  },
   "kv_namespaces": [
     {
       "binding": "OAUTH_KV",
