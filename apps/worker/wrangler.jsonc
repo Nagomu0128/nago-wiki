@@ -3,14 +3,25 @@
   "name": "nago-wiki-api",
   "main": "src/index.ts",
   "compatibility_date": "2026-08-18",
-  "compatibility_flags": ["nodejs_compat"],
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
   "observability": {
     "enabled": true,
     "head_sampling_rate": 1
   },
   "vars": {
-    "ENVIRONMENT": "development"
+    "ENVIRONMENT": "development",
+    "AI_GATEWAY_ID": "nago-wiki-dev",
+    "ANSWER_MODEL": "@cf/zai-org/glm-4.7-flash",
+    "DEFAULT_KNOWLEDGE_MODE": "wiki_plus_general",
+    "GOOGLE_CLIENT_ID": "configure-in-environment",
+    "MCP_PUBLIC_ORIGIN": "http://localhost:8787"
   },
+  "kv_namespaces": [
+    {
+      "binding": "OAUTH_KV",
+      "id": "00000000000000000000000000000000"
+    }
+  ],
   "d1_databases": [
     {
       "binding": "DB",
@@ -27,5 +38,35 @@
   ],
   "ai": {
     "binding": "AI"
-  }
+  },
+  "ai_search": [
+    {
+      "binding": "WIKI_SEARCH",
+      "instance_name": "nago-wiki-dev"
+    }
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "ASYNC_JOBS",
+        "queue": "nago-wiki-jobs-dev"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "nago-wiki-jobs-dev",
+        "max_batch_size": 10,
+        "max_batch_timeout": 5,
+        "max_retries": 3,
+        "dead_letter_queue": "nago-wiki-jobs-dlq-dev"
+      }
+    ]
+  },
+  "workflows": [
+    {
+      "name": "nago-wiki-import-dev",
+      "binding": "IMPORT_WORKFLOW",
+      "class_name": "ImportWorkflow"
+    }
+  ]
 }

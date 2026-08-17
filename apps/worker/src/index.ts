@@ -1,6 +1,13 @@
 import { Hono } from "hono";
 
+import { createAiRoutes } from "./ai/routes";
+import { consumeAsyncJobs } from "./jobs/consumer";
+
+export { ImportWorkflow } from "./imports/workflow";
+
 const app = new Hono<{ Bindings: Env }>();
+
+app.route("/api/v1/ai", createAiRoutes());
 
 app.get("/api/v1/health", (context) =>
   context.json({
@@ -23,4 +30,7 @@ app.notFound((context) =>
   ),
 );
 
-export default app;
+export default {
+  fetch: app.fetch,
+  queue: consumeAsyncJobs,
+} satisfies ExportedHandler<Env>;
