@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ApiFailure, createWikiApi, useApiQuery, type PageTreeNode, type WikiApi } from "./api";
+import { ActivityDrawer, ImportDrawer, SearchDrawer } from "./components";
 import { KnowledgeEditor } from "./editor";
 import { NativeYjsRealtimeProviderFactory, type RealtimeProviderFactory } from "./realtime";
 
 const defaultApi = createWikiApi();
 const defaultRealtimeFactory = new NativeYjsRealtimeProviderFactory();
 
-type DrawerMode = "search" | "ai";
+type DrawerMode = "search" | "ai" | "comments" | "versions" | "import";
 
 interface AppProps {
   api?: WikiApi;
@@ -183,6 +184,7 @@ export function App({ api = defaultApi, realtimeFactory = defaultRealtimeFactory
             <span>Nago Wiki</span><Icon name="chevron" /><strong>{page.data?.page.title ?? "読み込み中…"}</strong>
           </div>
           <div className="topbar-actions">
+            <button className="button button-quiet" onClick={() => { setDrawerMode("import"); setDrawerOpen(true); }} type="button"><Icon name="book" /> 取り込む</button>
             <button className="button button-quiet" onClick={() => { setDrawerMode("ai"); setDrawerOpen(true); }} type="button"><Icon name="spark" /> AIに質問</button>
             <button aria-label="ページメニュー" className="icon-button" type="button"><Icon name="more" /></button>
           </div>
@@ -195,8 +197,8 @@ export function App({ api = defaultApi, realtimeFactory = defaultRealtimeFactory
             <KnowledgeEditor
               api={api}
               key={page.data.page.id}
-              onOpenComments={() => { setDrawerOpen(true); }}
-              onOpenVersions={() => { setDrawerOpen(true); }}
+              onOpenComments={() => { setDrawerMode("comments"); setDrawerOpen(true); }}
+              onOpenVersions={() => { setDrawerMode("versions"); setDrawerOpen(true); }}
               realtimeFactory={realtimeFactory}
               resource={page.data}
             />
@@ -207,17 +209,15 @@ export function App({ api = defaultApi, realtimeFactory = defaultRealtimeFactory
       {drawerOpen && <button aria-label="パネルを閉じる" className="drawer-scrim" onClick={() => { setDrawerOpen(false); }} type="button" />}
       <aside aria-label="検索とAI" className={`utility-drawer ${drawerOpen ? "is-open" : ""}`}>
         <div className="drawer-header">
-          <div className="segmented-control" role="tablist" aria-label="ツール">
-            <button aria-selected={drawerMode === "search"} onClick={() => { setDrawerMode("search"); }} role="tab" type="button"><Icon name="search" /> 検索</button>
-            <button aria-selected={drawerMode === "ai"} onClick={() => { setDrawerMode("ai"); }} role="tab" type="button"><Icon name="spark" /> AI回答</button>
-          </div>
+          <button className="drawer-home" onClick={() => { setDrawerMode("search"); }} type="button"><Icon name={drawerMode === "ai" ? "spark" : drawerMode === "search" ? "search" : "chevron"} />{drawerMode === "search" || drawerMode === "ai" ? "Nago knowledge" : "検索とAIへ戻る"}</button>
           <button aria-label="パネルを閉じる" className="icon-button" onClick={() => { setDrawerOpen(false); }} type="button"><Icon name="close" /></button>
         </div>
-        <div className="drawer-placeholder">
-          <span className="feature-orb"><Icon name={drawerMode === "search" ? "search" : "spark"} /></span>
-          <h2>{drawerMode === "search" ? "すべての知識から探す" : "Wikiを根拠に回答する"}</h2>
-          <p>{drawerMode === "search" ? "キーワードと意味の両方から、閲覧できるページを横断検索します。" : "回答と引用元を分けて表示し、一般知識を使った箇所も明示します。"}</p>
-          <label className="search-field" htmlFor="workspace-search"><Icon name="search" /><input id="workspace-search" placeholder={drawerMode === "search" ? "検索語を入力…" : "Wikiに質問…"} /></label>
+        <div className="drawer-scroll">
+          {(drawerMode === "search" || drawerMode === "ai") && <SearchDrawer api={api} mode={drawerMode} onModeChange={setDrawerMode} onSelectPage={selectPage} />}
+          {(drawerMode === "comments" || drawerMode === "versions") && page.data && (
+            <ActivityDrawer api={api} baseRevision={page.data.page.revision} mode={drawerMode} onRestored={page.refetch} pageId={page.data.page.id} />
+          )}
+          {drawerMode === "import" && <ImportDrawer api={api} onApplied={(pageId) => { tree.refetch(); selectPage(pageId); setDrawerOpen(false); }} parentPageId={effectiveSelectedPageId} />}
         </div>
       </aside>
     </div>
