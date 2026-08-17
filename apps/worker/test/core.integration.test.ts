@@ -11,6 +11,7 @@ import {
   DEFAULT_WORKSPACE_ID,
   D1WikiRepository,
 } from "../src/core/repository";
+import { TagsService } from "../src/core/tags-service";
 
 class MemoryVersionBodyStore implements VersionBodyStore {
   readonly #values = new Map<string, string>();
@@ -247,6 +248,27 @@ describe("D1 wiki core", () => {
     expect(await service.listComments(viewer, page.page.id)).toHaveLength(1);
   });
 
+  it("keeps tags on restricted pages out of unauthorized tag lists", async () => {
+    const page = await service.createPage(editor, {
+      parentId: null,
+      title: "Tagged secret",
+      bodyMd: "",
+      accessMode: "restricted",
+    });
+    const tags = new TagsService(env.DB);
+    await expect(
+      tags.replacePageTags(editor, page.page.id, ["Cloudflare", "AI"]),
+    ).resolves.toHaveLength(2);
+
+    await expect(tags.listVisible(viewer)).resolves.toEqual([]);
+    await expect(tags.listVisible(owner)).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "AI" }),
+        expect.objectContaining({ name: "Cloudflare" }),
+      ]),
+    );
+  });
+
   it("provisions a verified Access identity once as a viewer", async () => {
     const claims = {
       aud: "audience",
@@ -309,6 +331,7 @@ async function resetDatabase(): Promise<void> {
     DELETE FROM imports;
     DELETE FROM bot_channel_allowlist;
     DELETE FROM bot_events;
+    DELETE FROM bot_rate_limits;
     DELETE FROM account_link_codes;
     DELETE FROM chat_audit;
     DELETE FROM audit_events;

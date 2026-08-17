@@ -1,10 +1,12 @@
 import type { IndexPageJob } from "./contracts";
+import { refreshPageLinks } from "./wiki-links";
 
 interface IndexablePageRow {
   id: string;
   workspace_id: string;
   title: string;
   body_md: string;
+  revision: number;
   content_hash: string;
   status: string;
 }
@@ -20,7 +22,7 @@ export async function indexPage(
 ): Promise<"indexed" | "superseded" | "deleted"> {
   const page = await dependencies.database
     .prepare(
-      `SELECT id, workspace_id, title, body_md, content_hash, status
+      `SELECT id, workspace_id, title, body_md, revision, content_hash, status
          FROM pages
         WHERE id = ?1 AND workspace_id = ?2`,
     )
@@ -37,6 +39,12 @@ export async function indexPage(
 
   const key = `w/${job.workspaceId}/p/${job.pageId}.md`;
   try {
+    await refreshPageLinks(dependencies.database, {
+      workspaceId: page.workspace_id,
+      pageId: page.id,
+      revision: page.revision,
+      markdown: page.body_md,
+    });
     await dependencies.search.items.upload(key, renderIndexDocument(page), {
       metadata: {
         workspace_id: job.workspaceId,
