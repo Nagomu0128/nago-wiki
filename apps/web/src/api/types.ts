@@ -125,7 +125,7 @@ export interface SearchHit {
 
 export interface SearchResponse {
   hits: SearchHit[];
-  nextCursor?: string;
+  cursor: string | null;
 }
 
 export type AnswerState = "wiki" | "mixed" | "general" | "insufficient";

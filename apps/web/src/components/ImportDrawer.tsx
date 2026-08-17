@@ -75,7 +75,7 @@ export function ImportDrawer({ api, parentPageId, picker, onApplied }: ImportDra
           <div className="source-form">
             {sourceType === "google_docs" && (
               <>
-                <button className="google-picker-button" disabled={!picker} onClick={() => { void chooseGoogleDocument(); }} type="button"><span>G</span>{sourceLabel || "Google Pickerで文書を選択"}</button>
+                <button className="google-picker-button" disabled={!picker} onClick={() => { void chooseGoogleDocument().catch(() => undefined); }} type="button"><span>G</span>{sourceLabel || "Google Pickerで文書を選択"}</button>
                 {!picker && <small>Google Picker adapter接続後に利用できます。開発時はDocument IDを入力できます。</small>}
                 <label>Document ID<input onChange={(event) => { setSourceValue(event.target.value); }} placeholder="1AbC…" value={sourceValue} /></label>
               </>
@@ -91,7 +91,7 @@ export function ImportDrawer({ api, parentPageId, picker, onApplied }: ImportDra
             )}
             {sourceType === "paste" && <label>本文<textarea onChange={(event) => { setSourceValue(event.target.value); }} placeholder="HTMLまたはテキストを貼り付け…" rows={9} value={sourceValue} /></label>}
             {createImport.status === "error" && <div className="drawer-error" role="alert">{createImport.error.message}</div>}
-            <button className="import-start" disabled={!sourceValue && !sourceLabel || createImport.status === "loading"} onClick={() => { void startImport(); }} type="button">{createImport.status === "loading" ? "変換を開始中…" : "プレビューを作成"}</button>
+            <button className="import-start" disabled={!sourceValue && !sourceLabel || createImport.status === "loading"} onClick={() => { void startImport().catch(() => undefined); }} type="button">{createImport.status === "loading" ? "変換を開始中…" : "プレビューを作成"}</button>
           </div>
         </>
       ) : (
@@ -103,7 +103,7 @@ export function ImportDrawer({ api, parentPageId, picker, onApplied }: ImportDra
           <div className="diff-header"><strong>現在の本文との差分</strong><span><i className="added" />追加 <i className="removed" />削除</span></div>
           <pre className="diff-view" aria-label="取り込み差分">{diff.map((line, index) => <span className={`is-${line.kind}`} key={`${String(index)}-${line.kind}`}><b>{line.kind === "added" ? "+" : line.kind === "removed" ? "−" : " "}</b>{line.value || " "}</span>)}</pre>
           {applyImport.status === "error" && <div className="drawer-error" role="alert">{applyImport.error.message}</div>}
-          <div className="import-actions"><button onClick={() => { setJob(null); }} type="button">戻る</button><button disabled={!title.trim() || applyImport.status === "loading"} onClick={() => { void apply(); }} type="button">Wikiへ反映</button></div>
+          <div className="import-actions"><button onClick={() => { setJob(null); }} type="button">戻る</button><button disabled={!title.trim() || applyImport.status === "loading"} onClick={() => { void apply().catch(() => undefined); }} type="button">Wikiへ反映</button></div>
         </div>
       )}
     </div>

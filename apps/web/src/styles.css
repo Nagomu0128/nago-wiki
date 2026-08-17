@@ -285,6 +285,7 @@ kbd {
 .inline-warning { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 14px; padding: 9px 11px; border: 1px solid #dfd2ad; border-radius: 7px; color: #725f2f; background: #fbf5e4; font-size: 11px; }
 .inline-warning.is-error { border-color: #e2c4c0; color: #873d38; background: #fcf1ef; }
 .inline-warning button { border: 0; color: inherit; text-decoration: underline; background: transparent; cursor: pointer; }
+.page-action-error { width: min(820px, calc(100% - 72px)); margin: 20px auto 0; }
 .wiki-link-popover { position: absolute; z-index: 15; top: 54px; left: 28px; display: grid; width: min(340px, calc(100% - 56px)); padding: 6px; border: 1px solid var(--line); border-radius: 10px; background: var(--paper-raised); box-shadow: var(--shadow); }
 .wiki-link-popover small { padding: 5px 7px; color: var(--faint); font-size: 9px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
 .wiki-link-popover button { display: grid; grid-template-columns: 1fr auto; gap: 9px; padding: 7px 8px; border: 0; border-radius: 6px; text-align: start; background: transparent; cursor: pointer; }
