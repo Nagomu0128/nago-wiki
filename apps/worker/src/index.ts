@@ -2,6 +2,9 @@ import { Hono } from "hono";
 
 import { createAiRoutes } from "./ai/routes";
 import { consumeAsyncJobs } from "./jobs/consumer";
+import { createMcpOAuthProvider } from "./mcp/oauth";
+import { isMcpOAuthPath } from "./mcp/security";
+import type { McpRuntimeEnv } from "./mcp/types";
 
 export { ImportWorkflow } from "./imports/workflow";
 
@@ -31,6 +34,12 @@ app.notFound((context) =>
 );
 
 export default {
-  fetch: app.fetch,
+  fetch(request, environment, context) {
+    const path = new URL(request.url).pathname;
+    if (isMcpOAuthPath(path)) {
+      return createMcpOAuthProvider(environment).fetch(request, environment, context);
+    }
+    return app.fetch(request, environment, context);
+  },
   queue: consumeAsyncJobs,
-} satisfies ExportedHandler<Env>;
+} satisfies ExportedHandler<McpRuntimeEnv>;
