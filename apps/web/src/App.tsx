@@ -156,6 +156,20 @@ export function App({ api = defaultApi, realtimeFactory = defaultRealtimeFactory
     setPageOverride(updated);
   }, [refetchTree, visiblePage?.page.title]);
 
+  const pageMoved = useCallback((updated: PageResource) => {
+    setPageOverride(updated);
+    refetchTree();
+  }, [refetchTree]);
+
+  const pageTrashed = useCallback((pageIds: string[]) => {
+    const trashed = new Set(pageIds);
+    const nextPage = tree.data ? flattenTree(tree.data).find((candidate) => !trashed.has(candidate.id)) : undefined;
+    setPageOverride(null);
+    setSelectedPageId(nextPage?.id ?? null);
+    setPageActionError(null);
+    refetchTree();
+  }, [refetchTree, tree.data]);
+
   return (
     <div className={`workspace-shell ${drawerOpen ? "has-drawer" : ""}`}>
       <a className="skip-link" href="#page-content">本文へ移動</a>
@@ -217,7 +231,9 @@ export function App({ api = defaultApi, realtimeFactory = defaultRealtimeFactory
               key={visiblePage.page.id}
               onOpenComments={() => { setDrawerMode("comments"); setDrawerOpen(true); }}
               onOpenVersions={() => { setDrawerMode("versions"); setDrawerOpen(true); }}
+              onMoved={pageMoved}
               onSaved={pageSaved}
+              onTrashed={pageTrashed}
               realtimeFactory={realtimeFactory}
               resource={visiblePage}
             />
@@ -226,7 +242,7 @@ export function App({ api = defaultApi, realtimeFactory = defaultRealtimeFactory
       </main>
 
       {drawerOpen && <button aria-label="パネルを閉じる" className="drawer-scrim" onClick={() => { setDrawerOpen(false); }} type="button" />}
-      <aside aria-label="検索とAI" className={`utility-drawer ${drawerOpen ? "is-open" : ""}`}>
+      {drawerOpen && <aside aria-label="検索とAI" className="utility-drawer is-open">
         <div className="drawer-header">
           <button className="drawer-home" onClick={() => { setDrawerMode("search"); }} type="button"><Icon name={drawerMode === "ai" ? "spark" : drawerMode === "search" ? "search" : "chevron"} />{drawerMode === "search" || drawerMode === "ai" ? "Nago knowledge" : "検索とAIへ戻る"}</button>
           <button aria-label="パネルを閉じる" className="icon-button" onClick={() => { setDrawerOpen(false); }} type="button"><Icon name="close" /></button>
@@ -238,7 +254,7 @@ export function App({ api = defaultApi, realtimeFactory = defaultRealtimeFactory
           )}
           {drawerMode === "import" && <ImportDrawer api={api} onApplied={(pageId) => { tree.refetch(); selectPage(pageId); setDrawerOpen(false); }} parentPageId={effectiveSelectedPageId} />}
         </div>
-      </aside>
+      </aside>}
     </div>
   );
 }

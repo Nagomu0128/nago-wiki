@@ -34,4 +34,16 @@ describe("workspace keyboard navigation", () => {
 
     expect(document.activeElement).toBe(view.container.querySelector("#workspace-search"));
   });
+
+  it("removes a closed utility drawer from the tab and accessibility trees", async () => {
+    view = await renderView(<App api={api} realtimeFactory={unusedRealtime} />);
+    const close = view.container.querySelector<HTMLButtonElement>("aside[aria-label='検索とAI'] button[aria-label='パネルを閉じる']");
+    if (!close) throw new Error("Drawer close button was not rendered");
+
+    act(() => { close.click(); });
+    await flushUi();
+
+    expect(view.container.querySelector("aside[aria-label='検索とAI']")).toBeNull();
+    expect(view.container.querySelector("#workspace-search")).toBeNull();
+  });
 });

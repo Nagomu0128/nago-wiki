@@ -98,4 +98,36 @@ describe("KnowledgeEditor", () => {
     expect(view.container.textContent).toContain("rev. 4");
     expect(getPage).toHaveBeenCalledWith(resource.page.id);
   });
+
+  it("reports move and trash results so the shell can refresh navigation", async () => {
+    const moved = { ...resource, page: { ...resource.page, parentId: null, revision: 4 } };
+    const movePage = vi.fn(() => Promise.resolve(moved));
+    const trashPage = vi.fn(() => Promise.resolve({ status: "trashed" as const, pageIds: [resource.page.id] }));
+    const onMoved = vi.fn();
+    const onTrashed = vi.fn();
+    const api = { ...apiWithUpdate(vi.fn(() => Promise.resolve(resource))), movePage, trashPage } as unknown as WikiApi;
+    view = await renderView(
+      <KnowledgeEditor
+        api={api}
+        onMoved={onMoved}
+        onTrashed={onTrashed}
+        realtimeFactory={realtimeFactory}
+        resource={resource}
+        surfaceComponent={TestSurface}
+      />,
+    );
+    const buttons = [...view.container.querySelectorAll("button")];
+
+    await act(async () => {
+      buttons.find((button) => button.textContent === "ルートへ移動")?.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      buttons.find((button) => button.textContent === "ゴミ箱へ移動")?.click();
+      await Promise.resolve();
+    });
+
+    expect(onMoved).toHaveBeenCalledWith(moved);
+    expect(onTrashed).toHaveBeenCalledWith([resource.page.id]);
+  });
 });
