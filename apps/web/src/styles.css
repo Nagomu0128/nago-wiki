@@ -481,8 +481,8 @@ kbd {
 
 @media (max-width: 760px) {
   .workspace-shell, .workspace-shell.has-drawer { display: block; }
-  .sidebar { position: fixed; z-index: 40; inset: 0 auto 0 0; width: min(290px, 88vw); transform: translateX(-103%); transition: transform 180ms ease; box-shadow: var(--shadow); }
-  .sidebar.is-open { transform: none; }
+  .sidebar { position: fixed; z-index: 40; inset: 0 auto 0 0; width: min(290px, 88vw); visibility: hidden; transform: translateX(-103%); transition: transform 180ms ease, visibility 0s linear 180ms; box-shadow: var(--shadow); }
+  .sidebar.is-open { visibility: visible; transform: none; transition-delay: 0s; }
   .scrim { position: fixed; z-index: 39; inset: 0; display: block; border: 0; background: rgb(30 29 25 / 25%); backdrop-filter: blur(1px); }
   .mobile-only { display: inline-grid; }
   .page-topbar { padding-inline: 8px 10px; }

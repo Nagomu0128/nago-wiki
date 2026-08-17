@@ -119,6 +119,8 @@ interface KnowledgeEditorProps {
   realtimeFactory: RealtimeProviderFactory;
   suggestionProvider?: WikiLinkSuggestionProvider;
   onSaved?: (resource: PageResource) => void;
+  onMoved?: (resource: PageResource) => void;
+  onTrashed?: (pageIds: string[]) => void;
   onOpenComments?: () => void;
   onOpenVersions?: () => void;
   surfaceComponent?: EditorSurfaceComponent;
@@ -139,6 +141,8 @@ export function KnowledgeEditor({
   realtimeFactory,
   suggestionProvider,
   onSaved,
+  onMoved,
+  onTrashed,
   onOpenComments,
   onOpenVersions,
   surfaceComponent: Surface = CrepeSurface,
@@ -324,11 +328,14 @@ export function KnowledgeEditor({
   };
 
   const moveToRoot = async () => {
-    await api.movePage(resource.page.id, { parentId: null });
+    const updated = await api.movePage(resource.page.id, { parentId: null });
+    setRevision(updated.page.revision);
+    onMoved?.(updated);
   };
 
   const trash = async () => {
-    await api.trashPage(resource.page.id);
+    const result = await api.trashPage(resource.page.id);
+    onTrashed?.(result.pageIds);
   };
 
   const runPageAction = (action: () => Promise<unknown>) => {
