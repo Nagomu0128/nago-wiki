@@ -86,7 +86,11 @@ function asArrayBuffer(bytes: Uint8Array): ArrayBuffer {
 }
 
 export class PageRoomStorage {
-  public constructor(private readonly sql: SqlStorage) {}
+  private readonly sql: SqlStorage;
+
+  public constructor(private readonly storage: DurableObjectStorage) {
+    this.sql = storage.sql;
+  }
 
   public initializeSchema(): void {
     this.sql.exec(`
@@ -178,9 +182,7 @@ export class PageRoomStorage {
     baseRevision: number,
     now: number,
   ): boolean {
-    let initialized = false;
-    this.sql.exec("BEGIN IMMEDIATE");
-    try {
+    return this.storage.transactionSync(() => {
       const meta = this.getMeta();
       if (!meta.initialized) {
         const seed = new Y.Doc();
@@ -201,22 +203,17 @@ export class PageRoomStorage {
           now,
         );
         Y.applyUpdate(doc, snapshot);
-        initialized = true;
+        return true;
       }
-      this.sql.exec("COMMIT");
-    } catch (error) {
-      this.sql.exec("ROLLBACK");
-      throw error;
-    }
-    return initialized;
+      return false;
+    });
   }
 
   public persistUpdate(update: Uint8Array, now: number): {
     sequence: number;
     nextFlushAt: number;
   } {
-    this.sql.exec("BEGIN IMMEDIATE");
-    try {
+    return this.storage.transactionSync(() => {
       const meta = this.getMeta();
       const firstDirtyAt = meta.dirty ? (meta.firstDirtyAt ?? now) : now;
       const nextFlushAt = computeFlushDeadline(firstDirtyAt, now);
@@ -239,12 +236,8 @@ export class PageRoomStorage {
         nextFlushAt,
         now,
       );
-      this.sql.exec("COMMIT");
       return { sequence, nextFlushAt };
-    } catch (error) {
-      this.sql.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   public prepareFlush(doc: Y.Doc): PendingFlush | null {
@@ -270,8 +263,7 @@ export class PageRoomStorage {
     newRevision: number,
     now: number,
   ): FlushCompletion {
-    this.sql.exec("BEGIN IMMEDIATE");
-    try {
+    return this.storage.transactionSync(() => {
       this.sql.exec(
         "INSERT OR REPLACE INTO y_snapshots(sequence, snapshot, created_at) VALUES (?, ?, ?)",
         pending.throughSequence,
@@ -316,12 +308,8 @@ export class PageRoomStorage {
         nextFlushAt,
         now,
       );
-      this.sql.exec("COMMIT");
       return { nextFlushAt, hasPendingUpdates };
-    } catch (error) {
-      this.sql.exec("ROLLBACK");
-      throw error;
-    }
+    });
   }
 
   public recordConflict(currentRevision: number, now: number): number {
