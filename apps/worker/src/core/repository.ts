@@ -78,11 +78,17 @@ interface IdRow extends Record<string, unknown> {
 }
 
 interface PermissionRow extends Record<string, unknown> {
-  permission: "editor" | "viewer";
+  permission: "editor" | "viewer" | null;
 }
 
 interface IdentityUserRow extends UserRow {
   external_subject: string;
+}
+
+interface IdempotencyRow extends Record<string, unknown> {
+  page_id: string;
+  request_hash: string;
+  expires_at: string;
 }
 
 export interface PageVersionStorageRecord {
@@ -113,6 +119,13 @@ export interface PageMutationInput {
   authorId: string;
   reason: PageVersion["reason"];
   previousPath?: string;
+}
+
+export interface PageCreationIdempotency {
+  userId: string;
+  keyHash: string;
+  requestHash: string;
+  expiresAt: string;
 }
 
 export class D1WikiRepository {
@@ -236,11 +249,12 @@ export class D1WikiRepository {
     return result.results;
   }
 
-  public async getNearestRestrictedAncestor(
+  public async getRestrictedAncestorPermissions(
     pageId: string,
     workspaceId: string,
-  ): Promise<string | null> {
-    const row = await this.database
+    userId: string,
+  ): Promise<("editor" | "viewer" | null)[]> {
+    const result = await this.database
       .prepare(
         `WITH RECURSIVE lineage(id, parent_id, access_mode, depth) AS (
            SELECT id, parent_id, access_mode, 0
@@ -252,32 +266,22 @@ export class D1WikiRepository {
            JOIN lineage ON parent.id = lineage.parent_id
            WHERE parent.workspace_id = ?
          )
-         SELECT id
+         SELECT acl.permission
          FROM lineage
-         WHERE access_mode = 'restricted'
-         ORDER BY depth
-         LIMIT 1`,
+         LEFT JOIN page_acl acl ON acl.page_id = lineage.id AND acl.user_id = ?
+         WHERE lineage.access_mode = 'restricted'
+         ORDER BY lineage.depth`,
       )
-      .bind(pageId, workspaceId, workspaceId)
-      .first<IdRow>();
-    return row?.id ?? null;
-  }
-
-  public async getAclPermission(
-    restrictedPageId: string,
-    userId: string,
-  ): Promise<"editor" | "viewer" | null> {
-    const row = await this.database
-      .prepare("SELECT permission FROM page_acl WHERE page_id = ? AND user_id = ?")
-      .bind(restrictedPageId, userId)
-      .first<PermissionRow>();
-    return row?.permission ?? null;
+      .bind(pageId, workspaceId, workspaceId, userId)
+      .all<PermissionRow>();
+    return result.results.map((row) => row.permission);
   }
 
   public async createPage(
     page: Page,
     version: PageVersionStorageRecord,
     restrictedCreatorPermission: "editor" | null,
+    idempotency?: PageCreationIdempotency,
   ): Promise<void> {
     const statements: D1PreparedStatement[] = [
       this.database
@@ -329,11 +333,39 @@ export class D1WikiRepository {
           ),
       );
     }
+    if (idempotency !== undefined) {
+      statements.push(
+        this.database
+          .prepare(
+            `INSERT INTO page_create_idempotency
+               (user_id, key_hash, request_hash, page_id, created_at, expires_at)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+          )
+          .bind(
+            idempotency.userId,
+            idempotency.keyHash,
+            idempotency.requestHash,
+            page.id,
+            page.createdAt,
+            idempotency.expiresAt,
+          ),
+      );
+    }
 
     try {
       await this.database.batch(statements);
     } catch (error) {
       if (isD1UniqueConstraintError(error)) {
+        if (
+          error instanceof Error &&
+          /page_create_idempotency/i.test(error.message)
+        ) {
+          throw new ApiProblem(
+            "IDEMPOTENCY_CONFLICT",
+            409,
+            "This idempotency key has already been used",
+          );
+        }
         throw new ApiProblem(
           "PAGE_SLUG_CONFLICT",
           409,
@@ -342,6 +374,41 @@ export class D1WikiRepository {
       }
       throw error;
     }
+  }
+
+  public async getPageCreationIdempotency(
+    userId: string,
+    keyHash: string,
+  ): Promise<{ pageId: string; requestHash: string; expiresAt: string } | null> {
+    const row = await this.database
+      .prepare(
+        `SELECT page_id, request_hash, expires_at
+         FROM page_create_idempotency
+         WHERE user_id = ? AND key_hash = ?`,
+      )
+      .bind(userId, keyHash)
+      .first<IdempotencyRow>();
+    return row === null
+      ? null
+      : {
+          pageId: row.page_id,
+          requestHash: row.request_hash,
+          expiresAt: row.expires_at,
+        };
+  }
+
+  public async deleteExpiredPageCreationIdempotency(
+    userId: string,
+    keyHash: string,
+    now: string,
+  ): Promise<void> {
+    await this.database
+      .prepare(
+        `DELETE FROM page_create_idempotency
+         WHERE user_id = ? AND key_hash = ? AND expires_at <= ?`,
+      )
+      .bind(userId, keyHash, now)
+      .run();
   }
 
   public async mutatePage(input: PageMutationInput): Promise<StoredPageMutation> {
@@ -368,7 +435,7 @@ export class D1WikiRepository {
         .prepare(
           `UPDATE pages
            SET parent_id = ?, slug = ?, title = ?, body_md = ?, revision = ?,
-               content_hash = ?, updated_at = ?
+               content_hash = ?, updated_at = ?, last_mutation_id = ?
            WHERE id = ? AND revision = ? AND status = 'active'`,
         )
         .bind(
@@ -379,6 +446,7 @@ export class D1WikiRepository {
           revision,
           input.contentHash,
           updatedAt,
+          version.id,
           input.pageId,
           input.baseRevision,
         ),
@@ -388,7 +456,7 @@ export class D1WikiRepository {
              (id, page_id, revision, r2_key, content_hash, author_id, reason,
               storage_status, storage_error, created_at)
            SELECT ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, ?
-           FROM pages WHERE id = ? AND revision = ? AND updated_at = ?`,
+           FROM pages WHERE id = ? AND revision = ? AND last_mutation_id = ?`,
         )
         .bind(
           version.id,
@@ -401,7 +469,7 @@ export class D1WikiRepository {
           version.createdAt,
           input.pageId,
           revision,
-          updatedAt,
+          version.id,
         ),
       this.database
         .prepare(
@@ -423,7 +491,7 @@ export class D1WikiRepository {
           `INSERT INTO index_state
              (page_id, desired_hash, indexed_hash, status, last_error, updated_at)
            SELECT ?, ?, NULL, 'pending', NULL, ?
-           FROM pages WHERE id = ? AND revision = ? AND updated_at = ?
+           FROM page_versions WHERE id = ?
            ON CONFLICT(page_id) DO UPDATE SET
              desired_hash = excluded.desired_hash,
              status = 'pending',
@@ -434,9 +502,7 @@ export class D1WikiRepository {
           input.pageId,
           input.contentHash,
           updatedAt,
-          input.pageId,
-          revision,
-          updatedAt,
+          version.id,
         ),
     ];
     if (input.previousPath !== undefined) {
@@ -445,9 +511,15 @@ export class D1WikiRepository {
           .prepare(
             `INSERT OR IGNORE INTO page_aliases
                (workspace_id, normalized_path, page_id, created_at)
-             VALUES (?, ?, ?, ?)`,
+             SELECT ?, ?, ?, ? FROM page_versions WHERE id = ?`,
           )
-          .bind(page.workspaceId, input.previousPath, page.id, updatedAt),
+          .bind(
+            page.workspaceId,
+            input.previousPath,
+            page.id,
+            updatedAt,
+            version.id,
+          ),
       );
     }
 
@@ -573,30 +645,19 @@ export class D1WikiRepository {
                  FROM lineage
                  JOIN pages parent ON parent.id = lineage.parent_id
                  WHERE parent.workspace_id = ?
-               ),
-               restricted AS (
-                 SELECT page_id, ancestor_id, depth
-                 FROM lineage
-                 WHERE access_mode = 'restricted'
-               ),
-               nearest AS (
-                 SELECT restricted.page_id, restricted.ancestor_id
-                 FROM restricted
-                 WHERE restricted.depth = (
-                   SELECT min(candidate.depth)
-                   FROM restricted candidate
-                   WHERE candidate.page_id = restricted.page_id
-                 )
                )
                SELECT p.id, p.parent_id, p.slug, p.title, p.access_mode, p.updated_at
                FROM pages p
-               LEFT JOIN nearest ON nearest.page_id = p.id
                WHERE p.workspace_id = ? AND p.status = 'active'
-                 AND (
-                   nearest.ancestor_id IS NULL OR EXISTS (
-                     SELECT 1 FROM page_acl acl
-                     WHERE acl.page_id = nearest.ancestor_id AND acl.user_id = ?
-                   )
+                 AND NOT EXISTS (
+                   SELECT 1
+                   FROM lineage restricted
+                   WHERE restricted.page_id = p.id
+                     AND restricted.access_mode = 'restricted'
+                     AND NOT EXISTS (
+                       SELECT 1 FROM page_acl acl
+                       WHERE acl.page_id = restricted.ancestor_id AND acl.user_id = ?
+                     )
                  )
                ORDER BY p.title COLLATE NOCASE, p.id`,
             )

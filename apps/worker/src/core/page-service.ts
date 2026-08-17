@@ -40,6 +40,7 @@ export interface WikiCoreService {
   createPage(
     identity: AuthenticatedIdentity,
     request: CreatePageRequest,
+    idempotencyKey?: string,
   ): Promise<PageWithPermission>;
   updatePage(
     identity: AuthenticatedIdentity,
@@ -215,12 +216,60 @@ export class D1WikiCoreService implements WikiCoreService {
   public async createPage(
     identity: AuthenticatedIdentity,
     request: CreatePageRequest,
+    idempotencyKey?: string,
   ): Promise<PageWithPermission> {
     assertWorkspaceEditor(identity);
     if (request.parentId !== null) {
       await this.requirePage(identity, request.parentId, true, false);
     }
     assertPageBodySize(request.bodyMd);
+    const slug = normalizeSlug(request.slug ?? request.title);
+    let idempotency:
+      | {
+          userId: string;
+          keyHash: string;
+          requestHash: string;
+          expiresAt: string;
+        }
+      | undefined;
+    if (idempotencyKey !== undefined) {
+      const keyHash = await hashMarkdown(idempotencyKey);
+      const requestHash = await hashMarkdown(
+        JSON.stringify([
+          request.parentId,
+          slug,
+          request.title,
+          request.bodyMd,
+          request.accessMode,
+        ]),
+      );
+      const existing = await this.repository.getPageCreationIdempotency(
+        identity.id,
+        keyHash,
+      );
+      const currentTime = new Date().toISOString();
+      if (existing !== null && existing.expiresAt > currentTime) {
+        if (existing.requestHash !== requestHash) {
+          throw idempotencyConflict();
+        }
+        const existingPage = await this.repository.getPage(existing.pageId);
+        if (existingPage === null) throw idempotencyConflict();
+        return this.toPageResponse(identity, existingPage);
+      }
+      if (existing !== null) {
+        await this.repository.deleteExpiredPageCreationIdempotency(
+          identity.id,
+          keyHash,
+          currentTime,
+        );
+      }
+      idempotency = {
+        userId: identity.id,
+        keyHash,
+        requestHash,
+        expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+      };
+    }
     const now = new Date().toISOString();
     const pageId = createUuidV7();
     const contentHash = await hashMarkdown(request.bodyMd);
@@ -228,7 +277,7 @@ export class D1WikiCoreService implements WikiCoreService {
       id: pageId,
       workspaceId: identity.workspaceId,
       parentId: request.parentId,
-      slug: normalizeSlug(request.slug ?? request.title),
+      slug,
       title: request.title,
       bodyMd: request.bodyMd,
       revision: 1,
@@ -251,13 +300,32 @@ export class D1WikiCoreService implements WikiCoreService {
       storageStatus: "pending",
       createdAt: now,
     };
-    await this.repository.createPage(
-      page,
-      version,
-      request.accessMode === "restricted" && identity.role !== "owner"
-        ? "editor"
-        : null,
-    );
+    try {
+      await this.repository.createPage(
+        page,
+        version,
+        request.accessMode === "restricted" && identity.role !== "owner"
+          ? "editor"
+          : null,
+        idempotency,
+      );
+    } catch (error) {
+      if (
+        error instanceof ApiProblem &&
+        error.code === "IDEMPOTENCY_CONFLICT" &&
+        idempotency !== undefined
+      ) {
+        const existing = await this.repository.getPageCreationIdempotency(
+          identity.id,
+          idempotency.keyHash,
+        );
+        if (existing?.requestHash === idempotency.requestHash) {
+          const existingPage = await this.repository.getPage(existing.pageId);
+          if (existingPage !== null) return this.toPageResponse(identity, existingPage);
+        }
+      }
+      throw error;
+    }
     if (this.directMutations !== undefined) {
       await this.directMutations.persistVersion(version, request.bodyMd);
     }
@@ -389,6 +457,13 @@ export class D1WikiCoreService implements WikiCoreService {
     request: CreateCommentRequest,
   ): Promise<Comment> {
     await this.requirePage(identity, pageId, false, false);
+    if (new TextEncoder().encode(request.bodyMd).byteLength > 65_536) {
+      throw new ApiProblem(
+        "PAYLOAD_TOO_LARGE",
+        413,
+        "Comment Markdown must not exceed 64 KiB",
+      );
+    }
     return this.repository.createComment(
       pageId,
       identity.id,
@@ -458,4 +533,12 @@ function assertPageBodySize(bodyMd: string): void {
       "Page Markdown must not exceed 1 MiB",
     );
   }
+}
+
+function idempotencyConflict(): ApiProblem {
+  return new ApiProblem(
+    "IDEMPOTENCY_CONFLICT",
+    409,
+    "This idempotency key was used with a different request",
+  );
 }

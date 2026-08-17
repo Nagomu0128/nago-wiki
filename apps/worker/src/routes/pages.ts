@@ -43,9 +43,13 @@ export function createPagesRoutes(options: PagesRoutesOptions = {}) {
 
   app.post("/pages", async (context) => {
     const request = await parseJsonBody(context, createPageRequestSchema);
+    const idempotencyKey = parseIdempotencyKey(
+      context.req.header("Idempotency-Key"),
+    );
     const result = await createService(context.env).createPage(
       requireIdentity(context),
       request,
+      idempotencyKey,
     );
     return context.json(result, 201);
   });
@@ -160,8 +164,9 @@ async function parseJsonBody<Schema extends z.ZodType>(
 
   let body: unknown;
   try {
-    body = await context.req.json<unknown>();
-  } catch {
+    body = await readBoundedJson(context.req.raw, MAX_JSON_BODY_BYTES);
+  } catch (error) {
+    if (error instanceof ApiProblem) throw error;
     throw new ApiProblem("INVALID_REQUEST", 400, "A valid JSON body is required");
   }
   const parsed = schema.safeParse(body);
@@ -176,10 +181,47 @@ async function parseJsonBody<Schema extends z.ZodType>(
   return parsed.data;
 }
 
+async function readBoundedJson(request: Request, limit: number): Promise<unknown> {
+  if (request.body === null) throw new Error("missing request body");
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const result = await reader.read();
+    if (result.done) break;
+    size += result.value.byteLength;
+    if (size > limit) {
+      await reader.cancel();
+      throw new ApiProblem("PAYLOAD_TOO_LARGE", 413, "Request body is too large");
+    }
+    chunks.push(result.value);
+  }
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return JSON.parse(new TextDecoder().decode(bytes)) as unknown;
+}
+
 function parseId(value: string): string {
   const parsed = pageIdSchema.safeParse(value);
   if (!parsed.success) {
     throw new ApiProblem("PAGE_NOT_FOUND", 404, "Page was not found or is not visible");
   }
   return parsed.data;
+}
+
+function parseIdempotencyKey(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const trimmed = value.trim();
+  if (trimmed.length === 0 || trimmed.length > 200) {
+    throw new ApiProblem(
+      "INVALID_REQUEST",
+      400,
+      "Idempotency-Key must contain between 1 and 200 characters",
+    );
+  }
+  return trimmed;
 }

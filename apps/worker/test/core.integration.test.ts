@@ -1,0 +1,317 @@
+import type { AuthenticatedIdentity } from "@nago-wiki/shared";
+import { env } from "cloudflare:workers";
+import { beforeEach, describe, expect, it } from "vitest";
+import { createUuidV7 } from "../src/core/ids";
+import {
+  D1PageMutationService,
+  D1WikiCoreService,
+  type VersionBodyStore,
+} from "../src/core/page-service";
+import {
+  DEFAULT_WORKSPACE_ID,
+  D1WikiRepository,
+} from "../src/core/repository";
+
+class MemoryVersionBodyStore implements VersionBodyStore {
+  readonly #values = new Map<string, string>();
+
+  public get(key: string): Promise<string | null> {
+    return Promise.resolve(this.#values.get(key) ?? null);
+  }
+
+  public put(key: string, bodyMd: string): Promise<void> {
+    this.#values.set(key, bodyMd);
+    return Promise.resolve();
+  }
+}
+
+describe("D1 wiki core", () => {
+  let owner: AuthenticatedIdentity;
+  let editor: AuthenticatedIdentity;
+  let viewer: AuthenticatedIdentity;
+  let repository: D1WikiRepository;
+  let service: D1WikiCoreService;
+
+  beforeEach(async () => {
+    await resetDatabase();
+    owner = await insertUser("owner", "owner@example.com");
+    editor = await insertUser("editor", "editor@example.com");
+    viewer = await insertUser("viewer", "viewer@example.com");
+    repository = new D1WikiRepository(env.DB);
+    const mutations = new D1PageMutationService(
+      repository,
+      new MemoryVersionBodyStore(),
+    );
+    service = new D1WikiCoreService(repository, mutations, mutations);
+  });
+
+  it("inherits the nearest restricted ancestor ACL", async () => {
+    const restricted = await service.createPage(editor, {
+      parentId: null,
+      title: "Restricted",
+      bodyMd: "secret",
+      accessMode: "restricted",
+    });
+    const child = await service.createPage(editor, {
+      parentId: restricted.page.id,
+      title: "Child",
+      bodyMd: "nested",
+      accessMode: "workspace",
+    });
+
+    await expect(service.getPage(viewer, restricted.page.id)).rejects.toMatchObject({
+      code: "PAGE_NOT_FOUND",
+      status: 404,
+    });
+    await expect(service.getPage(viewer, child.page.id)).rejects.toMatchObject({
+      code: "PAGE_NOT_FOUND",
+      status: 404,
+    });
+    expect((await service.getPage(editor, child.page.id)).permission).toBe("editor");
+    expect((await service.getPage(owner, child.page.id)).permission).toBe("owner");
+  });
+
+  it("does not let a child ACL expand a restricted ancestor", async () => {
+    const parent = await service.createPage(editor, {
+      parentId: null,
+      title: "Parent secret",
+      bodyMd: "parent",
+      accessMode: "restricted",
+    });
+    const child = await service.createPage(editor, {
+      parentId: parent.page.id,
+      title: "Child secret",
+      bodyMd: "child",
+      accessMode: "restricted",
+    });
+    const now = new Date().toISOString();
+    await env.DB.prepare(
+      `INSERT INTO page_acl (page_id, user_id, permission, created_at, updated_at)
+       VALUES (?, ?, 'viewer', ?, ?)`,
+    )
+      .bind(child.page.id, viewer.id, now, now)
+      .run();
+
+    await expect(service.getPage(viewer, child.page.id)).rejects.toMatchObject({
+      code: "PAGE_NOT_FOUND",
+    });
+    expect(await service.listTree(viewer)).toEqual([]);
+  });
+
+  it("rejects stale REST updates and preserves the winning revision", async () => {
+    const created = await service.createPage(editor, {
+      parentId: null,
+      title: "Concurrency",
+      bodyMd: "one",
+      accessMode: "workspace",
+    });
+    const updated = await service.updatePage(editor, created.page.id, {
+      baseRevision: 1,
+      bodyMd: "two",
+    });
+    expect(updated.page.revision).toBe(2);
+
+    await expect(
+      service.updatePage(editor, created.page.id, {
+        baseRevision: 1,
+        bodyMd: "stale",
+      }),
+    ).rejects.toMatchObject({ code: "REVISION_CONFLICT", status: 409 });
+    expect((await service.getPage(editor, created.page.id)).page.bodyMd).toBe("two");
+  });
+
+  it("prevents cycles when moving a page", async () => {
+    const parent = await service.createPage(editor, {
+      parentId: null,
+      title: "Parent",
+      bodyMd: "",
+      accessMode: "workspace",
+    });
+    const child = await service.createPage(editor, {
+      parentId: parent.page.id,
+      title: "Child",
+      bodyMd: "",
+      accessMode: "workspace",
+    });
+
+    await expect(
+      service.movePage(editor, parent.page.id, { parentId: child.page.id }),
+    ).rejects.toMatchObject({ code: "INVALID_PAGE_MOVE", status: 409 });
+  });
+
+  it("trashes and restores an entire subtree", async () => {
+    const parent = await service.createPage(editor, {
+      parentId: null,
+      title: "Parent",
+      bodyMd: "",
+      accessMode: "workspace",
+    });
+    const child = await service.createPage(editor, {
+      parentId: parent.page.id,
+      title: "Child",
+      bodyMd: "",
+      accessMode: "workspace",
+    });
+
+    expect(await service.trashPage(editor, parent.page.id)).toEqual(
+      expect.arrayContaining([parent.page.id, child.page.id]),
+    );
+    await expect(service.getPage(editor, child.page.id)).rejects.toMatchObject({
+      code: "PAGE_NOT_FOUND",
+    });
+
+    await service.restorePage(editor, parent.page.id);
+    expect((await service.getPage(editor, child.page.id)).page.status).toBe("active");
+  });
+
+  it("restores immutable version content as a new revision", async () => {
+    const created = await service.createPage(editor, {
+      parentId: null,
+      title: "History",
+      bodyMd: "original",
+      accessMode: "workspace",
+    });
+    await service.updatePage(editor, created.page.id, {
+      baseRevision: 1,
+      bodyMd: "changed",
+    });
+    const versions = await service.listVersions(editor, created.page.id);
+    const original = versions.find((version) => version.revision === 1);
+    expect(original).toBeDefined();
+    if (original === undefined) throw new Error("expected original version");
+
+    const restored = await service.restoreVersion(
+      editor,
+      created.page.id,
+      original.id,
+      { baseRevision: 2 },
+    );
+    expect(restored.page).toMatchObject({ bodyMd: "original", revision: 3 });
+  });
+
+  it("keeps restricted titles out of another user's tree", async () => {
+    await service.createPage(editor, {
+      parentId: null,
+      title: "Visible",
+      bodyMd: "",
+      accessMode: "workspace",
+    });
+    await service.createPage(editor, {
+      parentId: null,
+      title: "Hidden",
+      bodyMd: "",
+      accessMode: "restricted",
+    });
+
+    const tree = await service.listTree(viewer);
+    expect(tree.map((page) => page.title)).toEqual(["Visible"]);
+  });
+
+  it("stores comments and validated mentions", async () => {
+    const page = await service.createPage(editor, {
+      parentId: null,
+      title: "Discussion",
+      bodyMd: "",
+      accessMode: "workspace",
+    });
+    const comment = await service.createComment(viewer, page.page.id, {
+      bodyMd: "Hello @editor",
+      mentionedUserIds: [editor.id],
+    });
+    expect(comment.mentionedUserIds).toEqual([editor.id]);
+    expect(await service.listComments(viewer, page.page.id)).toHaveLength(1);
+  });
+
+  it("provisions a verified Access identity once as a viewer", async () => {
+    const claims = {
+      aud: "audience",
+      email: "new-member@example.com",
+      exp: 2_000_000_000,
+      iss: "https://team.cloudflareaccess.com",
+      name: "New Member",
+      sub: "new-member-subject",
+    };
+    const first = await repository.resolveAccessIdentity(claims);
+    const second = await repository.resolveAccessIdentity(claims);
+
+    expect(first).toMatchObject({ role: "viewer", status: "active" });
+    expect(second.id).toBe(first.id);
+    const identityCount = await env.DB.prepare(
+      "SELECT count(*) AS count FROM external_identities WHERE external_subject = ?",
+    )
+      .bind(claims.sub)
+      .first<{ count: number }>();
+    expect(identityCount?.count).toBe(1);
+  });
+
+  it("replays page creation idempotently and rejects key reuse", async () => {
+    const request = {
+      parentId: null,
+      title: "Idempotent",
+      bodyMd: "same request",
+      accessMode: "workspace" as const,
+    };
+    const first = await service.createPage(editor, request, "request-key");
+    const replay = await service.createPage(editor, request, "request-key");
+    expect(replay.page.id).toBe(first.page.id);
+
+    await expect(
+      service.createPage(
+        editor,
+        { ...request, bodyMd: "different request" },
+        "request-key",
+      ),
+    ).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT", status: 409 });
+  });
+});
+
+async function resetDatabase(): Promise<void> {
+  await env.DB.exec(`
+    DELETE FROM mentions;
+    DELETE FROM comments;
+    DELETE FROM page_version_outbox;
+    DELETE FROM page_versions;
+    DELETE FROM page_tags;
+    DELETE FROM page_links;
+    DELETE FROM page_aliases;
+    DELETE FROM page_acl;
+    DELETE FROM index_state;
+    DELETE FROM page_create_idempotency;
+    UPDATE pages SET parent_id = NULL;
+    DELETE FROM pages;
+    DELETE FROM tags;
+    DELETE FROM external_identities;
+    DELETE FROM imports;
+    DELETE FROM bot_channel_allowlist;
+    DELETE FROM bot_events;
+    DELETE FROM account_link_codes;
+    DELETE FROM chat_audit;
+    DELETE FROM audit_events;
+    DELETE FROM users;
+  `);
+}
+
+async function insertUser(
+  role: AuthenticatedIdentity["role"],
+  email: string,
+): Promise<AuthenticatedIdentity> {
+  const id = createUuidV7();
+  const now = new Date().toISOString();
+  await env.DB.prepare(
+    `INSERT INTO users
+       (id, workspace_id, email, display_name, role, status, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, 'active', ?, ?)`,
+  )
+    .bind(id, DEFAULT_WORKSPACE_ID, email, email, role, now, now)
+    .run();
+  return {
+    id,
+    workspaceId: DEFAULT_WORKSPACE_ID,
+    email,
+    displayName: email,
+    role,
+    status: "active",
+    subject: `subject:${email}`,
+    expiresAt: Math.floor(Date.now() / 1_000) + 3_600,
+  };
+}
