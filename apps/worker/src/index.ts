@@ -2,6 +2,7 @@ import { Hono } from "hono";
 
 import { createAiRoutes } from "./ai/routes";
 import { consumeAsyncJobs } from "./jobs/consumer";
+import { createImportRoutes } from "./imports/routes";
 import { createMcpOAuthProvider } from "./mcp/oauth";
 import { isMcpOAuthPath } from "./mcp/security";
 import type { McpRuntimeEnv } from "./mcp/types";
@@ -11,6 +12,7 @@ export { ImportWorkflow } from "./imports/workflow";
 const app = new Hono<{ Bindings: Env }>();
 
 app.route("/api/v1/ai", createAiRoutes());
+app.route("/api/v1", createImportRoutes());
 
 app.get("/api/v1/health", (context) =>
   context.json({

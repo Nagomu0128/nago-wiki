@@ -11,4 +11,5 @@ export interface McpAuthProps {
 export interface McpRuntimeEnv extends Env {
   OAUTH_PROVIDER: OAuthHelpers;
   GOOGLE_CLIENT_SECRET: string;
+  TOKEN_ENCRYPTION_KEY: string;
 }

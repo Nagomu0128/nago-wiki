@@ -1,0 +1,237 @@
+import { zValidator } from "@hono/zod-validator";
+import { Hono } from "hono";
+import { HTTPException } from "hono/http-exception";
+import { z } from "zod";
+
+import { exchangeGoogleAuthorizationCode } from "./google-client";
+import { GoogleTokenVault } from "./token-vault";
+import type { ImportWorkflowParams } from "./workflow";
+import type { McpRuntimeEnv } from "../mcp/types";
+
+interface ImportApi {
+  Bindings: McpRuntimeEnv;
+  Variables: { userId: string };
+}
+
+interface MemberRow {
+  id: string;
+  email: string;
+  role: "owner" | "editor" | "viewer";
+}
+
+interface ImportRow {
+  id: string;
+  workspace_id: string;
+  user_id: string;
+  source_type: string;
+  source_metadata_json: string;
+  status: string;
+  report_r2_key: string | null;
+  created_at: string;
+  updated_at: string;
+  expires_at: string | null;
+}
+
+const googleStateSchema = z.object({
+  userId: z.string(),
+  expectedEmail: z.email(),
+  returnTo: z.url(),
+});
+
+const createImportSchema = z.object({
+  workspaceId: z.string().min(1).max(128),
+  source: z.object({
+    type: z.literal("google_docs"),
+    documentId: z.string().min(1).max(256),
+  }),
+});
+
+export function createImportRoutes(): Hono<ImportApi> {
+  const routes = new Hono<ImportApi>();
+
+  routes.get("/imports/google/authorize", async (context) => {
+    const userId = requireUserId(context.get("userId"), context.req.header("x-nago-user-id"));
+    const member = await requireEditor(context.env.DB, userId);
+    const returnTo = safeReturnUrl(
+      context.req.query("returnTo") ?? `${context.env.MCP_PUBLIC_ORIGIN}/imports`,
+      context.env.MCP_PUBLIC_ORIGIN,
+    );
+    const state = crypto.randomUUID();
+    await context.env.OAUTH_KV.put(
+      `import:google-state:${state}`,
+      JSON.stringify({ userId, expectedEmail: member.email, returnTo }),
+      { expirationTtl: 600 },
+    );
+
+    const authorizationUrl = new URL("https://accounts.google.com/o/oauth2/v2/auth");
+    authorizationUrl.searchParams.set("client_id", context.env.GOOGLE_CLIENT_ID);
+    authorizationUrl.searchParams.set("redirect_uri", googleCallbackUrl(context.env));
+    authorizationUrl.searchParams.set("response_type", "code");
+    authorizationUrl.searchParams.set(
+      "scope",
+      "openid email https://www.googleapis.com/auth/drive.file",
+    );
+    authorizationUrl.searchParams.set("access_type", "offline");
+    authorizationUrl.searchParams.set("prompt", "consent select_account");
+    authorizationUrl.searchParams.set("state", state);
+    return context.json({ authorizationUrl: authorizationUrl.toString() });
+  });
+
+  routes.get("/imports/google/callback", async (context) => {
+    const state = context.req.query("state");
+    const code = context.req.query("code");
+    if (state === undefined || code === undefined) {
+      throw new HTTPException(400, { message: "Invalid Google OAuth callback" });
+    }
+    const stored = await context.env.OAUTH_KV.get(`import:google-state:${state}`);
+    await context.env.OAUTH_KV.delete(`import:google-state:${state}`);
+    const pending = googleStateSchema.safeParse(parseJson(stored));
+    if (!pending.success) {
+      throw new HTTPException(400, { message: "Expired Google OAuth callback" });
+    }
+    await exchangeGoogleAuthorizationCode(
+      context.env,
+      pending.data.userId,
+      pending.data.expectedEmail,
+      code,
+      googleCallbackUrl(context.env),
+    );
+    const redirect = new URL(pending.data.returnTo);
+    redirect.searchParams.set("google", "connected");
+    return context.redirect(redirect.toString(), 302);
+  });
+
+  routes.post("/imports", zValidator("json", createImportSchema), async (context) => {
+    const userId = requireUserId(context.get("userId"), context.req.header("x-nago-user-id"));
+    await requireEditor(context.env.DB, userId);
+    const vault = new GoogleTokenVault(
+      context.env.OAUTH_KV,
+      context.env.TOKEN_ENCRYPTION_KEY,
+    );
+    if ((await vault.get(userId)) === null) {
+      throw new HTTPException(409, { message: "Connect Google before importing" });
+    }
+    const request = context.req.valid("json");
+    const importId = crypto.randomUUID();
+    const now = new Date().toISOString();
+    await context.env.DB.prepare(
+      `INSERT INTO imports (
+         id, workspace_id, user_id, source_type, source_metadata_json,
+         status, created_at, updated_at
+       ) VALUES (?1, ?2, ?3, 'google_docs', ?4, 'queued', ?5, ?5)`,
+    )
+      .bind(
+        importId,
+        request.workspaceId,
+        userId,
+        JSON.stringify({ documentId: request.source.documentId }),
+        now,
+      )
+      .run();
+
+    const parameters: ImportWorkflowParams = {
+      importId,
+      workspaceId: request.workspaceId,
+      requestedBy: userId,
+      source: request.source,
+    };
+    try {
+      await context.env.IMPORT_WORKFLOW.create({
+        id: `import-${importId}`,
+        params: parameters,
+        retention: { successRetention: "7 days", errorRetention: "30 days" },
+      });
+    } catch (error) {
+      await context.env.DB.prepare(
+        `UPDATE imports SET status = 'failed', updated_at = ?2 WHERE id = ?1`,
+      )
+        .bind(importId, new Date().toISOString())
+        .run();
+      throw error;
+    }
+    return context.json({ id: importId, status: "queued" as const }, 202);
+  });
+
+  routes.get("/imports/:id", async (context) => {
+    const userId = requireUserId(context.get("userId"), context.req.header("x-nago-user-id"));
+    const member = await activeMember(context.env.DB, userId);
+    const value = await context.env.DB.prepare(
+      `SELECT id, workspace_id, user_id, source_type, source_metadata_json,
+              status, report_r2_key, created_at, updated_at, expires_at
+         FROM imports WHERE id = ?1`,
+    )
+      .bind(context.req.param("id"))
+      .first<ImportRow>();
+    if (value === null || (value.user_id !== userId && member.role !== "owner")) {
+      throw new HTTPException(404, { message: "Import not found" });
+    }
+    const metadata = z.record(z.string(), z.unknown()).catch({}).parse(
+      parseJson(value.source_metadata_json),
+    );
+    const previewKey = typeof metadata.previewKey === "string" ? metadata.previewKey : null;
+    const preview = previewKey === null ? null : await context.env.FILES.get(previewKey);
+    return context.json({
+      id: value.id,
+      workspaceId: value.workspace_id,
+      sourceType: value.source_type,
+      status: value.status,
+      metadata,
+      previewMarkdown: preview === null ? null : await preview.text(),
+      reportKey: value.report_r2_key,
+      createdAt: value.created_at,
+      updatedAt: value.updated_at,
+      expiresAt: value.expires_at,
+    });
+  });
+
+  return routes;
+}
+
+async function requireEditor(database: D1Database, userId: string): Promise<MemberRow> {
+  const member = await activeMember(database, userId);
+  if (member.role === "viewer") {
+    throw new HTTPException(403, { message: "Editor permission required" });
+  }
+  return member;
+}
+
+async function activeMember(database: D1Database, userId: string): Promise<MemberRow> {
+  const member = await database
+    .prepare(`SELECT id, email, role FROM users WHERE id = ?1 AND status = 'active'`)
+    .bind(userId)
+    .first<MemberRow>();
+  if (member === null) throw new HTTPException(401, { message: "Authentication required" });
+  return member;
+}
+
+function requireUserId(contextUserId: string | undefined, headerUserId: string | undefined): string {
+  const userId = contextUserId ?? headerUserId;
+  if (userId === undefined || userId.length === 0) {
+    throw new HTTPException(401, { message: "Authentication required" });
+  }
+  return userId;
+}
+
+function safeReturnUrl(value: string, publicOrigin: string): string {
+  const result = new URL(value, publicOrigin);
+  if (result.origin !== new URL(publicOrigin).origin) {
+    throw new HTTPException(400, { message: "Invalid return URL" });
+  }
+  return result.toString();
+}
+
+function googleCallbackUrl(environment: McpRuntimeEnv): string {
+  return new URL(
+    "/api/v1/imports/google/callback",
+    environment.MCP_PUBLIC_ORIGIN,
+  ).toString();
+}
+
+function parseJson(value: string | null): unknown {
+  if (value === null) return null;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
