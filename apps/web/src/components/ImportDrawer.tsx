@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useApiMutation, type ImportJob, type ImportRequest, type ImportSourceType, type WikiApi } from "../api";
 import { diffLines } from "./diff";
 
@@ -28,6 +28,8 @@ export function ImportDrawer({ api, parentPageId, picker, onApplied }: ImportDra
   const [job, setJob] = useState<ImportJob | null>(null);
   const [title, setTitle] = useState("");
   const [acceptedTags, setAcceptedTags] = useState<string[]>([]);
+  const [sourceError, setSourceError] = useState<Error | null>(null);
+  const [pollError, setPollError] = useState<Error | null>(null);
   const createImport = useApiMutation(async (_: null, signal) => {
     const input: ImportRequest = sourceType === "google_docs"
       ? { sourceType, documentId: sourceValue }
@@ -43,6 +45,27 @@ export function ImportDrawer({ api, parentPageId, picker, onApplied }: ImportDra
   }, signal));
   const diff = useMemo(() => job ? diffLines(job.currentMarkdown ?? "", job.previewMarkdown ?? "") : [], [job]);
 
+  useEffect(() => {
+    if (!job || (job.status !== "queued" && job.status !== "running")) return;
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      void api.getImport(job.id, controller.signal).then((updated) => {
+        setPollError(null);
+        setJob(updated);
+        if (updated.status === "preview_ready") {
+          setTitle(updated.suggestedTitle ?? updated.sourceLabel);
+          setAcceptedTags(updated.suggestedTags ?? []);
+        }
+      }, (error: unknown) => {
+        if (!controller.signal.aborted) setPollError(error instanceof Error ? error : new Error(String(error)));
+      });
+    }, 1_200);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [api, job]);
+
   const chooseGoogleDocument = async () => {
     const selected = await picker?.pick();
     if (selected) {
@@ -54,8 +77,10 @@ export function ImportDrawer({ api, parentPageId, picker, onApplied }: ImportDra
   const startImport = async () => {
     const created = await createImport.mutate(null);
     setJob(created);
-    setTitle(created.suggestedTitle ?? created.sourceLabel);
-    setAcceptedTags(created.suggestedTags ?? []);
+    if (created.status === "preview_ready") {
+      setTitle(created.suggestedTitle ?? created.sourceLabel);
+      setAcceptedTags(created.suggestedTags ?? []);
+    }
   };
 
   const apply = async () => {
@@ -86,10 +111,15 @@ export function ImportDrawer({ api, parentPageId, picker, onApplied }: ImportDra
                 const file = event.target.files?.[0];
                 if (!file) return;
                 setSourceLabel(file.name);
-                if (sourceType === "markdown") void file.text().then((content) => { setSourceValue(content); });
+                setSourceError(null);
+                const read = sourceType === "markdown" ? file.text() : readFileAsDataUrl(file);
+                void read.then(setSourceValue, (error: unknown) => {
+                  setSourceError(error instanceof Error ? error : new Error(String(error)));
+                });
               }} type="file" /><span>{sourceLabel || `${sourceType === "pdf" ? "PDF" : "Markdown"}をここへ選択`}</span></label>
             )}
             {sourceType === "paste" && <label>本文<textarea onChange={(event) => { setSourceValue(event.target.value); }} placeholder="HTMLまたはテキストを貼り付け…" rows={9} value={sourceValue} /></label>}
+            {sourceError && <div className="drawer-error" role="alert">{sourceError.message}</div>}
             {createImport.status === "error" && <div className="drawer-error" role="alert">{createImport.error.message}</div>}
             <button className="import-start" disabled={!sourceValue && !sourceLabel || createImport.status === "loading"} onClick={() => { void startImport().catch(() => undefined); }} type="button">{createImport.status === "loading" ? "変換を開始中…" : "プレビューを作成"}</button>
           </div>
@@ -97,6 +127,7 @@ export function ImportDrawer({ api, parentPageId, picker, onApplied }: ImportDra
       ) : (
         <div className="import-preview">
           <div className="import-job-state"><span className={`is-${job.status}`}>{job.status === "preview_ready" ? "プレビュー準備完了" : job.status}</span><small>{job.sourceLabel}</small></div>
+          {pollError && <div className="drawer-error" role="alert">{pollError.message}</div>}
           {job.warnings.map((warning) => <div className="inline-warning" key={warning}>{warning}</div>)}
           <label>ページタイトル<input onChange={(event) => { setTitle(event.target.value); }} value={title} /></label>
           {job.suggestedTags && <div className="suggested-tags"><span>AIによるタグ候補</span>{job.suggestedTags.map((tag) => <button aria-pressed={acceptedTags.includes(tag)} key={tag} onClick={() => { setAcceptedTags((current) => current.includes(tag) ? current.filter((value) => value !== tag) : [...current, tag]); }} type="button">#{tag}</button>)}</div>}
@@ -108,4 +139,16 @@ export function ImportDrawer({ api, parentPageId, picker, onApplied }: ImportDra
       )}
     </div>
   );
+}
+
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener("load", () => {
+      if (typeof reader.result === "string") resolve(reader.result);
+      else reject(new Error("PDFを読み込めませんでした。"));
+    });
+    reader.addEventListener("error", () => { reject(reader.error ?? new Error("PDFを読み込めませんでした。")); });
+    reader.readAsDataURL(file);
+  });
 }
