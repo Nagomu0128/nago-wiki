@@ -1,5 +1,6 @@
 import type {
   AnswerResponse,
+  AccountLinkCode,
   ApiErrorBody,
   ApplyImportInput,
   CreatePageInput,
@@ -15,6 +16,7 @@ import type {
   SearchResponse,
   UpdatePageInput,
   WikiApi,
+  BotProvider,
 } from "./types";
 
 export class ApiFailure extends Error {
@@ -192,6 +194,14 @@ export class HttpWikiApi implements WikiApi {
     return this.request<PageResource>(`/imports/${encodeURIComponent(id)}/apply`, {
       method: "POST",
       body: JSON.stringify(input),
+      signal: signal ?? null,
+    });
+  }
+
+  createAccountLink(provider: BotProvider, signal?: AbortSignal) {
+    return this.request<AccountLinkCode>("/account-links", {
+      method: "POST",
+      body: JSON.stringify({ provider }),
       signal: signal ?? null,
     });
   }

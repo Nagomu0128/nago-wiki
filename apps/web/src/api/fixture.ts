@@ -1,6 +1,7 @@
 import { RevisionConflictFailure } from "./client";
 import type {
   AnswerResponse,
+  AccountLinkCode,
   ApplyImportInput,
   CreatePageInput,
   ImportJob,
@@ -15,6 +16,7 @@ import type {
   UpdatePageInput,
   WikiApi,
   WikiPage,
+  BotProvider,
 } from "./types";
 
 const ids = {
@@ -327,5 +329,13 @@ export class FixtureWikiApi implements WikiApi {
     job.status = "applied";
     this.imports.set(id, job);
     return this.createPage({ parentId: input.parentId, title: input.title, bodyMd: job.previewMarkdown ?? "" }, signal);
+  }
+
+  async createAccountLink(_provider: BotProvider, signal?: AbortSignal): Promise<AccountLinkCode> {
+    await abortableDelay(signal);
+    return {
+      code: "fixture-link-code",
+      expiresAt: new Date(Date.now() + 10 * 60_000).toISOString(),
+    };
   }
 }

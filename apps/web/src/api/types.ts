@@ -176,6 +176,13 @@ export interface ApplyImportInput {
   acceptedTags: string[];
 }
 
+export type BotProvider = "discord" | "line";
+
+export interface AccountLinkCode {
+  code: string;
+  expiresAt: string;
+}
+
 export interface ApiErrorBody {
   error: { code: string; message: string; requestId: string; details?: unknown };
 }
@@ -198,4 +205,5 @@ export interface WikiApi {
   createImport(input: ImportRequest, signal?: AbortSignal): Promise<ImportJob>;
   getImport(id: string, signal?: AbortSignal): Promise<ImportJob>;
   applyImport(id: string, input: ApplyImportInput, signal?: AbortSignal): Promise<PageResource>;
+  createAccountLink(provider: BotProvider, signal?: AbortSignal): Promise<AccountLinkCode>;
 }

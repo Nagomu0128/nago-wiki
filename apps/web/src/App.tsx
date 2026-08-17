@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ApiFailure, createWikiApi, useApiQuery, type PageResource, type PageTreeNode, type WikiApi } from "./api";
-import { ActivityDrawer, ImportDrawer, SearchDrawer } from "./components";
+import { AccountLinkDrawer, ActivityDrawer, ImportDrawer, SearchDrawer } from "./components";
 import { KnowledgeEditor } from "./editor";
 import { NativeYjsRealtimeProviderFactory, type RealtimeProviderFactory } from "./realtime";
 
 const defaultApi = createWikiApi();
 const defaultRealtimeFactory = new NativeYjsRealtimeProviderFactory();
 
-type DrawerMode = "search" | "ai" | "comments" | "versions" | "import";
+type DrawerMode = "search" | "ai" | "comments" | "versions" | "import" | "account";
 
 interface AppProps {
   api?: WikiApi;
@@ -182,7 +182,7 @@ export function App({ api = defaultApi, realtimeFactory = defaultRealtimeFactory
             <strong>{me.data?.workspace.name ?? "Nago Wiki"}</strong>
             <span>{me.data?.user.displayName ?? "Private workspace"}</span>
           </div>
-          <button aria-label="ワークスペースメニュー" className="icon-button" type="button"><Icon name="more" /></button>
+          <button aria-label="アカウント連携を開く" className="icon-button" onClick={() => { setDrawerMode("account"); setDrawerOpen(true); }} type="button"><Icon name="more" /></button>
         </div>
 
         <button className="quick-search" onClick={() => { setDrawerMode("search"); setDrawerOpen(true); }} type="button">
@@ -253,6 +253,7 @@ export function App({ api = defaultApi, realtimeFactory = defaultRealtimeFactory
             <ActivityDrawer api={api} baseRevision={visiblePage.page.revision} key={`${drawerMode}-${visiblePage.page.id}`} mode={drawerMode} onRestored={() => { setPageOverride(null); page.refetch(); }} pageId={visiblePage.page.id} />
           )}
           {drawerMode === "import" && <ImportDrawer api={api} onApplied={(pageId) => { tree.refetch(); selectPage(pageId); setDrawerOpen(false); }} parentPageId={effectiveSelectedPageId} />}
+          {drawerMode === "account" && <AccountLinkDrawer api={api} />}
         </div>
       </aside>}
     </div>

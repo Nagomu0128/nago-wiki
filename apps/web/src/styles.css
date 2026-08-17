@@ -334,7 +334,7 @@ kbd {
 .search-field:focus-within { border-color: #6e9a90; box-shadow: 0 0 0 3px rgb(49 127 113 / 12%); }
 
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
-.explore-panel, .activity-panel, .import-panel { padding: 18px 18px 48px; }
+.explore-panel, .activity-panel, .import-panel, .account-link-panel { padding: 18px 18px 48px; }
 .explore-tabs { width: max-content; }
 .explore-intro { padding: 28px 2px 18px; }
 .drawer-eyebrow, .drawer-section-title > span { display: block; color: #42685e; font-size: 9px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
@@ -465,6 +465,18 @@ kbd {
 .import-actions { display: flex; justify-content: flex-end; gap: 6px; padding-top: 4px; }
 .import-actions button { padding: 6px 9px; border: 1px solid var(--line); border-radius: 6px; background: transparent; font-size: 9px; cursor: pointer; }
 .import-actions button:last-child { color: white; border-color: var(--accent); background: var(--accent); }
+
+.account-link-providers { display: flex; gap: 7px; margin: 18px 0 12px; padding: 0; border: 0; }
+.account-link-providers legend { width: 100%; margin-bottom: 7px; color: var(--muted); font-size: 9px; font-weight: 700; }
+.account-link-providers button { flex: 1; padding: 8px; border: 1px solid var(--line); border-radius: 7px; background: transparent; font-size: 10px; cursor: pointer; }
+.account-link-providers button[aria-pressed="true"] { color: #315e56; border-color: #a9c4bc; background: #e4eeea; }
+.account-link-issue { width: 100%; justify-content: center; }
+.account-link-result { display: grid; gap: 10px; margin-top: 16px; padding: 13px; border: 1px solid #b9cec7; border-radius: 9px; background: #f3f7f5; }
+.account-link-result > strong { font-size: 10px; }
+.account-link-result code { overflow-wrap: anywhere; padding: 9px; border-radius: 6px; color: #24463f; background: #e2ede9; font-size: 10px; }
+.account-link-result > button { justify-self: start; }
+.account-link-result ol { margin: 0; padding-left: 18px; color: var(--muted); font-size: 9.5px; line-height: 1.7; }
+.account-link-note { margin-top: 14px; color: var(--faint); font-size: 9px; line-height: 1.6; }
 
 .notice { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; margin: 24px; padding: 14px; border: 1px solid var(--line); border-radius: 9px; font-size: 12px; }
 .notice div, .notice strong, .notice span, .notice small { display: block; }
