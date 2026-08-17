@@ -22,7 +22,7 @@ export async function reconcilePendingJobs(environment: McpRuntimeEnv): Promise<
       `SELECT state.page_id, pages.workspace_id, state.desired_hash
          FROM index_state AS state
          JOIN pages ON pages.id = state.page_id
-        WHERE state.status IN ('pending', 'error') AND pages.status = 'active'
+        WHERE state.status IN ('pending', 'failed') AND pages.status = 'active'
         ORDER BY state.updated_at ASC LIMIT 50`,
     ).all<PendingIndexRow>(),
   ]);
@@ -49,4 +49,18 @@ export async function reconcilePendingJobs(environment: McpRuntimeEnv): Promise<
   for (let index = 0; index < messages.length; index += 100) {
     await environment.ASYNC_JOBS.sendBatch(messages.slice(index, index + 100));
   }
+  const auditExpiry = new Date().toISOString();
+  const staleRateWindow = Date.now() - 60 * 60 * 1_000;
+  await environment.DB.batch([
+    environment.DB.prepare(`DELETE FROM chat_audit WHERE expires_at <= ?1`).bind(
+      auditExpiry,
+    ),
+    environment.DB.prepare(
+      `DELETE FROM bot_rate_limits WHERE window_started_at < ?1`,
+    ).bind(staleRateWindow),
+    environment.DB.prepare(
+      `DELETE FROM account_link_codes
+        WHERE expires_at <= ?1 OR consumed_at IS NOT NULL`,
+    ).bind(auditExpiry),
+  ]);
 }

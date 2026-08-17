@@ -50,22 +50,22 @@ export async function indexPage(
       .prepare(
         `UPDATE index_state
             SET indexed_hash = ?2,
-                status = 'queued',
+                status = 'indexed',
                 last_error = NULL,
-                updated_at = unixepoch()
+                updated_at = ?3
           WHERE page_id = ?1 AND desired_hash = ?2`,
       )
-      .bind(page.id, page.content_hash)
+      .bind(page.id, page.content_hash, new Date().toISOString())
       .run();
     return "indexed";
   } catch (error) {
     await dependencies.database
       .prepare(
         `UPDATE index_state
-            SET status = 'error', last_error = ?2, updated_at = unixepoch()
+            SET status = 'failed', last_error = ?2, updated_at = ?3
           WHERE page_id = ?1`,
       )
-      .bind(page.id, errorMessage(error))
+      .bind(page.id, errorMessage(error), new Date().toISOString())
       .run();
     throw error;
   }
@@ -79,10 +79,10 @@ async function markDeleted(database: D1Database, pageId: string): Promise<void> 
   await database
     .prepare(
       `UPDATE index_state
-          SET status = 'deleted', last_error = NULL, updated_at = unixepoch()
+          SET status = 'deleted', last_error = NULL, updated_at = ?2
         WHERE page_id = ?1`,
     )
-    .bind(pageId)
+    .bind(pageId, new Date().toISOString())
     .run();
 }
 

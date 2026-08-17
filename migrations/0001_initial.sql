@@ -228,6 +228,15 @@ CREATE TABLE bot_events (
 
 CREATE INDEX bot_events_created_idx ON bot_events(created_at);
 
+CREATE TABLE bot_rate_limits (
+  scope_key TEXT PRIMARY KEY,
+  window_started_at INTEGER NOT NULL,
+  request_count INTEGER NOT NULL CHECK (request_count >= 1),
+  updated_at TEXT NOT NULL
+) STRICT;
+
+CREATE INDEX bot_rate_limits_window_idx ON bot_rate_limits(window_started_at);
+
 CREATE TABLE account_link_codes (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,

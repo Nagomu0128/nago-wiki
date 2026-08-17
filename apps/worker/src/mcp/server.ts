@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 
 import { D1SearchCandidateAuthorizer } from "../ai/authorizer";
+import { recordChatAudit } from "../ai/audit";
 import { WikiAnswerService, WorkersAiAnswerModel } from "../ai/answer-service";
 import { WikiSearchService } from "../ai/search-service";
 import { McpWikiRepository } from "./repository";
@@ -131,15 +132,22 @@ export function createWikiMcpServer(
         knowledgeMode: z.enum(["wiki_only", "wiki_plus_general"]).default("wiki_only"),
       }),
     },
-    async ({ query, knowledgeMode }) =>
-      jsonResult(
-        await answer.answer(auth.userId, {
+    async ({ query, knowledgeMode }) => {
+      const result = await answer.answer(auth.userId, {
           workspaceId: auth.workspaceId,
           query,
           knowledgeMode,
           maxCitations: 8,
-        }),
-      ),
+        });
+      await recordChatAudit(environment.DB, {
+        provider: "mcp",
+        userId: auth.userId,
+        query,
+        pageIds: result.citations.map((citation) => citation.pageId),
+        answerSummary: result.answer,
+      });
+      return jsonResult(result);
+    },
   );
 
   return server;

@@ -8,6 +8,7 @@ import { HTTPException } from "hono/http-exception";
 
 import { D1SearchCandidateAuthorizer } from "./authorizer";
 import { WikiAnswerService, WorkersAiAnswerModel } from "./answer-service";
+import { recordChatAudit } from "./audit";
 import { WikiSearchService } from "./search-service";
 
 interface AiApi {
@@ -50,8 +51,12 @@ export function createAiRoutes(): Hono<AiApi> {
   routes.post("/answer", zValidator("json", publicAnswerRequestSchema), async (context) => {
     const services = createServices(context.env);
     const request = context.req.valid("json");
+    const userId = requireUserId(
+      context.get("userId"),
+      context.req.header("x-nago-user-id"),
+    );
     const result = await services.answer.answer(
-      requireUserId(context.get("userId"), context.req.header("x-nago-user-id")),
+      userId,
       {
         query: request.query,
         workspaceId: context.env.WORKSPACE_ID,
@@ -61,6 +66,13 @@ export function createAiRoutes(): Hono<AiApi> {
         mode: "hybrid",
       },
     );
+    await recordChatAudit(context.env.DB, {
+      provider: "web",
+      userId,
+      query: request.query,
+      pageIds: result.citations.map((citation) => citation.pageId),
+      answerSummary: result.answer,
+    });
     return context.json({
       state: result.state,
       answerMarkdown: result.answer,

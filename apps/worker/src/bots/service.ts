@@ -1,4 +1,5 @@
 import { D1SearchCandidateAuthorizer } from "../ai/authorizer";
+import { recordChatAudit } from "../ai/audit";
 import { WikiAnswerService, WorkersAiAnswerModel } from "../ai/answer-service";
 import { WikiSearchService } from "../ai/search-service";
 import type { McpRuntimeEnv } from "../mcp/types";
@@ -96,6 +97,12 @@ export async function answerBotQuery(
     .bind(input.provider, input.eventId, userId, new Date().toISOString())
     .run();
 
+  if (!(await consumeBotRateLimit(environment.DB, userId, workspaceId))) {
+    const response = "利用が集中しています。1分ほど待ってから、もう一度お試しください。";
+    await finishEvent(environment.DB, input, userId, "completed", response);
+    return response;
+  }
+
   const publicOrigin = new URL(environment.MCP_PUBLIC_ORIGIN).origin;
   const search = new WikiSearchService(
     environment.WIKI_SEARCH,
@@ -116,6 +123,13 @@ export async function answerBotQuery(
       knowledgeMode: "wiki_only",
       maxCitations: 6,
     });
+    await recordChatAudit(environment.DB, {
+      provider: input.provider,
+      userId,
+      query: input.query,
+      pageIds: result.citations.map((citation) => citation.pageId),
+      answerSummary: result.answer,
+    });
     const response = formatBotAnswer(result.answer, result.citations);
     await finishEvent(environment.DB, input, userId, "completed", response);
     return response;
@@ -123,6 +137,48 @@ export async function answerBotQuery(
     await finishEvent(environment.DB, input, userId, "failed", null);
     throw error;
   }
+}
+
+export async function consumeBotRateLimit(
+  database: D1Database,
+  userId: string,
+  workspaceId: string,
+): Promise<boolean> {
+  const windowStart = Math.floor(Date.now() / 60_000) * 60_000;
+  const userAllowed = await consumeRateLimit(
+    database,
+    `user:${userId}`,
+    windowStart,
+    5,
+  );
+  if (!userAllowed) return false;
+  return consumeRateLimit(database, `workspace:${workspaceId}`, windowStart, 30);
+}
+
+async function consumeRateLimit(
+  database: D1Database,
+  scopeKey: string,
+  windowStart: number,
+  limit: number,
+): Promise<boolean> {
+  const row = await database
+    .prepare(
+      `INSERT INTO bot_rate_limits
+         (scope_key, window_started_at, request_count, updated_at)
+       VALUES (?1, ?2, 1, ?3)
+       ON CONFLICT(scope_key) DO UPDATE SET
+         window_started_at = excluded.window_started_at,
+         request_count = CASE
+           WHEN bot_rate_limits.window_started_at = excluded.window_started_at
+             THEN bot_rate_limits.request_count + 1
+           ELSE 1
+         END,
+         updated_at = excluded.updated_at
+       RETURNING request_count`,
+    )
+    .bind(scopeKey, windowStart, new Date().toISOString())
+    .first<{ request_count: number }>();
+  return row !== null && row.request_count <= limit;
 }
 
 async function resolveWorkspace(
