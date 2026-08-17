@@ -37,10 +37,7 @@ export function createBotRoutes(): Hono<BotApi> {
     "/account-links",
     zValidator("json", issueLinkSchema),
     async (context) => {
-      const userId = requireUserId(
-        context.get("userId"),
-        context.req.header("x-nago-user-id"),
-      );
+      const userId = requireUserId(context.get("userId"));
       const member = await context.env.DB.prepare(
         `SELECT id FROM users WHERE id = ?1 AND status = 'active'`,
       )
@@ -77,12 +74,11 @@ export function createBotRoutes(): Hono<BotApi> {
   return routes;
 }
 
-function requireUserId(contextUserId: string | undefined, headerUserId: string | undefined): string {
-  const userId = contextUserId ?? headerUserId;
-  if (userId === undefined || userId.length === 0) {
+function requireUserId(contextUserId: string | undefined): string {
+  if (contextUserId === undefined || contextUserId.length === 0) {
     throw new HTTPException(401, { message: "Authentication required" });
   }
-  return userId;
+  return contextUserId;
 }
 
 function parseJson(value: string): unknown {

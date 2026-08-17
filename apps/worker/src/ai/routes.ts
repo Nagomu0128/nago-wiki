@@ -20,10 +20,11 @@ export function createAiRoutes(): Hono<AiApi> {
   const routes = new Hono<AiApi>();
 
   routes.post("/search", zValidator("json", publicSearchRequestSchema), async (context) => {
-    const services = createServices(context.env);
+    const userId = requireUserId(context.get("userId"));
     const request = context.req.valid("json");
+    const services = createServices(context.env);
     const result = await services.search.search(
-      requireUserId(context.get("userId"), context.req.header("x-nago-user-id")),
+      userId,
       {
         query: request.query,
         workspaceId: context.env.WORKSPACE_ID,
@@ -49,12 +50,9 @@ export function createAiRoutes(): Hono<AiApi> {
   });
 
   routes.post("/answer", zValidator("json", publicAnswerRequestSchema), async (context) => {
-    const services = createServices(context.env);
+    const userId = requireUserId(context.get("userId"));
     const request = context.req.valid("json");
-    const userId = requireUserId(
-      context.get("userId"),
-      context.req.header("x-nago-user-id"),
-    );
+    const services = createServices(context.env);
     const result = await services.answer.answer(
       userId,
       {
@@ -107,10 +105,9 @@ function createServices(environment: Env): {
   return { search, answer: new WikiAnswerService(search, model) };
 }
 
-function requireUserId(contextUserId: string | undefined, headerUserId: string | undefined): string {
-  const userId = contextUserId ?? headerUserId;
-  if (userId === undefined || userId.length === 0) {
+function requireUserId(contextUserId: string | undefined): string {
+  if (contextUserId === undefined || contextUserId.length === 0) {
     throw new HTTPException(401, { message: "Authentication required" });
   }
-  return userId;
+  return contextUserId;
 }
