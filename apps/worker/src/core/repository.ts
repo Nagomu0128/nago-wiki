@@ -77,6 +77,10 @@ interface IdRow extends Record<string, unknown> {
   id: string;
 }
 
+interface TrashBatchRow extends Record<string, unknown> {
+  trash_batch_id: string;
+}
+
 interface PermissionRow extends Record<string, unknown> {
   permission: "editor" | "viewer" | null;
 }
@@ -707,6 +711,7 @@ export class D1WikiRepository {
 
   public async trashSubtree(pageId: string): Promise<string[]> {
     const now = new Date().toISOString();
+    const trashBatchId = createUuidV7();
     const results = await this.database.batch<IdRow>([
       this.database
         .prepare(
@@ -718,58 +723,78 @@ export class D1WikiRepository {
              WHERE child.status = 'active'
            )
            UPDATE pages
-           SET status = 'trashed', trashed_at = ?, updated_at = ?
+           SET status = 'trashed', trashed_at = ?, trash_batch_id = ?,
+               updated_at = ?, last_mutation_id = ?
            WHERE id IN (SELECT id FROM subtree)
            RETURNING id`,
         )
-        .bind(pageId, now, now),
+        .bind(pageId, now, trashBatchId, now, trashBatchId),
       this.database
         .prepare(
           `WITH RECURSIVE subtree(id) AS (
-             SELECT id FROM pages WHERE id = ?
+             SELECT id FROM pages WHERE id = ? AND last_mutation_id = ?
              UNION ALL
              SELECT child.id FROM pages child JOIN subtree ON child.parent_id = subtree.id
+             WHERE child.last_mutation_id = ?
            )
            UPDATE index_state
            SET status = 'deleted', updated_at = ?
            WHERE page_id IN (SELECT id FROM subtree)`,
         )
-        .bind(pageId, now),
+        .bind(pageId, trashBatchId, trashBatchId, now),
     ]);
     return (results[0]?.results ?? []).map((row) => row.id);
   }
 
   public async restoreSubtree(pageId: string): Promise<string[]> {
     const now = new Date().toISOString();
+    const trashBatch = await this.database
+      .prepare(
+        `SELECT trash_batch_id FROM pages
+         WHERE id = ? AND status = 'trashed' AND trash_batch_id IS NOT NULL`,
+      )
+      .bind(pageId)
+      .first<TrashBatchRow>();
+    if (trashBatch === null) return [];
+    const restoreMutationId = createUuidV7();
     try {
       const results = await this.database.batch<IdRow>([
         this.database
           .prepare(
             `WITH RECURSIVE subtree(id) AS (
-               SELECT id FROM pages WHERE id = ? AND status = 'trashed'
+               SELECT id FROM pages
+               WHERE id = ? AND status = 'trashed' AND trash_batch_id = ?
                UNION ALL
                SELECT child.id FROM pages child
                JOIN subtree ON child.parent_id = subtree.id
-               WHERE child.status = 'trashed'
+               WHERE child.status = 'trashed' AND child.trash_batch_id = ?
              )
              UPDATE pages
-             SET status = 'active', trashed_at = NULL, updated_at = ?
+             SET status = 'active', trashed_at = NULL, trash_batch_id = NULL,
+                 updated_at = ?, last_mutation_id = ?
              WHERE id IN (SELECT id FROM subtree)
              RETURNING id`,
           )
-          .bind(pageId, now),
+          .bind(
+            pageId,
+            trashBatch.trash_batch_id,
+            trashBatch.trash_batch_id,
+            now,
+            restoreMutationId,
+          ),
         this.database
           .prepare(
             `WITH RECURSIVE subtree(id) AS (
-               SELECT id FROM pages WHERE id = ?
+               SELECT id FROM pages WHERE id = ? AND last_mutation_id = ?
                UNION ALL
                SELECT child.id FROM pages child JOIN subtree ON child.parent_id = subtree.id
+               WHERE child.last_mutation_id = ?
              )
              UPDATE index_state
              SET status = 'pending', indexed_hash = NULL, last_error = NULL, updated_at = ?
              WHERE page_id IN (SELECT id FROM subtree)`,
           )
-          .bind(pageId, now),
+          .bind(pageId, restoreMutationId, restoreMutationId, now),
       ]);
       return (results[0]?.results ?? []).map((row) => row.id);
     } catch (error) {

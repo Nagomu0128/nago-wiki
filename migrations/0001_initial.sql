@@ -46,10 +46,14 @@ CREATE TABLE pages (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   trashed_at TEXT,
+  trash_batch_id TEXT,
   last_mutation_id TEXT,
   UNIQUE (id, workspace_id),
   FOREIGN KEY (parent_id, workspace_id) REFERENCES pages(id, workspace_id) ON DELETE RESTRICT,
-  CHECK ((status = 'active' AND trashed_at IS NULL) OR (status = 'trashed' AND trashed_at IS NOT NULL)),
+  CHECK (
+    (status = 'active' AND trashed_at IS NULL AND trash_batch_id IS NULL) OR
+    (status = 'trashed' AND trashed_at IS NOT NULL AND trash_batch_id IS NOT NULL)
+  ),
   CHECK (parent_id IS NULL OR parent_id <> id)
 ) STRICT;
 
