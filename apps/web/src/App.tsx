@@ -1,12 +1,16 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ApiFailure, createWikiApi, useApiQuery, type PageTreeNode, type WikiApi } from "./api";
+import { KnowledgeEditor } from "./editor";
+import { NativeYjsRealtimeProviderFactory, type RealtimeProviderFactory } from "./realtime";
 
 const defaultApi = createWikiApi();
+const defaultRealtimeFactory = new NativeYjsRealtimeProviderFactory();
 
 type DrawerMode = "search" | "ai";
 
 interface AppProps {
   api?: WikiApi;
+  realtimeFactory?: RealtimeProviderFactory;
 }
 
 function flattenTree(nodes: PageTreeNode[]): PageTreeNode[] {
@@ -87,7 +91,7 @@ function PageTree({ nodes, activeId, onSelect }: TreeProps) {
   return <ul aria-label="ページ" className="page-tree" role="tree">{renderNodes(nodes, 1)}</ul>;
 }
 
-export function App({ api = defaultApi }: AppProps) {
+export function App({ api = defaultApi, realtimeFactory = defaultRealtimeFactory }: AppProps) {
   const [selectedPageId, setSelectedPageId] = useState<string | null>(null);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(true);
@@ -188,12 +192,14 @@ export function App({ api = defaultApi }: AppProps) {
           {page.status === "loading" && <div className="page-skeleton" aria-label="ページを読み込み中"><i /><i /><i /><i /></div>}
           {page.status === "error" && <ErrorNotice error={page.error} retry={page.refetch} />}
           {page.data && (
-            <article className="page-placeholder">
-              <div className="page-kicker"><span>最終更新 {new Date(page.data.page.updatedAt).toLocaleDateString("ja-JP")}</span><span>rev. {page.data.page.revision}</span></div>
-              <h1>{page.data.page.title}</h1>
-              <div className="tag-row">{page.data.tags.map((tag) => <span className="tag" key={tag.id}>#{tag.name}</span>)}</div>
-              <pre>{page.data.page.bodyMd}</pre>
-            </article>
+            <KnowledgeEditor
+              api={api}
+              key={page.data.page.id}
+              onOpenComments={() => { setDrawerOpen(true); }}
+              onOpenVersions={() => { setDrawerOpen(true); }}
+              realtimeFactory={realtimeFactory}
+              resource={page.data}
+            />
           )}
         </section>
       </main>
