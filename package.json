@@ -1,0 +1,37 @@
+{
+  "name": "nago-wiki",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "check": "npm run lint && npm run typecheck && npm run test && npm run build",
+    "dev": "concurrently -n worker,web -c cyan,magenta \"npm run dev -w @nago-wiki/worker\" \"npm run dev -w @nago-wiki/web\"",
+    "lint": "eslint . --max-warnings=0",
+    "test": "npm run test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.21.3",
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^26.2.0",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "concurrently": "^10.0.5",
+    "eslint": "^10.8.1",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "eslint-plugin-react-refresh": "^0.5.4",
+    "happy-dom": "^20.11.2",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.67.0",
+    "vitest": "^4.1.10",
+    "wrangler": "^4.123.0"
+  }
+}
