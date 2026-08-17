@@ -2,6 +2,7 @@ import type { OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 
 export interface McpAuthProps {
   userId: string;
+  workspaceId: string;
   email: string;
   displayName: string;
   role: "owner" | "editor" | "viewer";

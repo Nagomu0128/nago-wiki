@@ -13,7 +13,7 @@ export interface SearchCandidateAuthorizer {
   authorize(
     userId: string,
     candidate: SearchCandidate,
-    filters: Pick<SearchRequest, "parentPageId" | "tags">,
+    filters: Pick<SearchRequest, "parentPageId" | "tags" | "tagIds">,
   ): Promise<AuthorizedChunk | null>;
 }
 
@@ -30,7 +30,7 @@ export class D1SearchCandidateAuthorizer implements SearchCandidateAuthorizer {
   public async authorize(
     userId: string,
     candidate: SearchCandidate,
-    filters: Pick<SearchRequest, "parentPageId" | "tags">,
+    filters: Pick<SearchRequest, "parentPageId" | "tags" | "tagIds">,
   ): Promise<AuthorizedChunk | null> {
     const row = await this.database
       .prepare(
@@ -67,7 +67,9 @@ export class D1SearchCandidateAuthorizer implements SearchCandidateAuthorizer {
                   ELSE 0
                 END AS authorized
            FROM pages AS page
-           JOIN users AS member ON member.id = ?3 AND member.status = 'active'
+           JOIN users AS member ON member.id = ?3
+                                AND member.workspace_id = page.workspace_id
+                                AND member.status = 'active'
           WHERE page.id = ?1
             AND page.workspace_id = ?2
             AND page.status = 'active'
@@ -82,6 +84,16 @@ export class D1SearchCandidateAuthorizer implements SearchCandidateAuthorizer {
                      SELECT value FROM json_each(?5)
                    )
               )
+            )
+            AND (
+              ?6 IS NULL OR EXISTS (
+                SELECT 1
+                  FROM page_tags
+                 WHERE page_tags.page_id = page.id
+                   AND page_tags.tag_id IN (
+                     SELECT value FROM json_each(?6)
+                   )
+              )
             )`,
       )
       .bind(
@@ -90,6 +102,7 @@ export class D1SearchCandidateAuthorizer implements SearchCandidateAuthorizer {
         userId,
         filters.parentPageId ?? null,
         filters.tags === undefined ? null : JSON.stringify(filters.tags),
+        filters.tagIds === undefined ? null : JSON.stringify(filters.tagIds),
       )
       .first<AuthorizedPageRow>();
 

@@ -10,17 +10,34 @@ export const searchRequestSchema = z.object({
   workspaceId: z.string().min(1).max(128),
   parentPageId: optionalIdSchema,
   tags: z.array(z.string().min(1).max(100)).max(20).optional(),
-  limit: z.number().int().min(1).max(20).default(8),
+  tagIds: z.array(z.string().min(1).max(128)).max(50).optional(),
+  mode: z.enum(["keyword", "semantic", "hybrid"]).default("hybrid"),
+  limit: z.number().int().min(1).max(50).default(20),
 });
-export type SearchRequest = z.infer<typeof searchRequestSchema>;
+type ParsedSearchRequest = z.infer<typeof searchRequestSchema>;
+export type SearchRequest = Omit<ParsedSearchRequest, "mode"> & {
+  mode?: ParsedSearchRequest["mode"];
+};
 
 export const answerRequestSchema = searchRequestSchema
   .omit({ limit: true })
   .extend({
     knowledgeMode: knowledgeModeSchema.default("wiki_plus_general"),
     maxCitations: z.number().int().min(1).max(12).default(8),
+    conversation: z
+      .array(
+        z.object({
+          role: z.enum(["user", "assistant"]),
+          content: z.string().min(1).max(20_000),
+        }),
+      )
+      .max(20)
+      .optional(),
   });
-export type AnswerRequest = z.infer<typeof answerRequestSchema>;
+type ParsedAnswerRequest = z.infer<typeof answerRequestSchema>;
+export type AnswerRequest = Omit<ParsedAnswerRequest, "mode"> & {
+  mode?: ParsedAnswerRequest["mode"];
+};
 
 export const authorizedChunkSchema = z.object({
   chunkId: z.string(),
@@ -56,6 +73,8 @@ export const citationSchema = z.object({
   path: z.string(),
   url: z.string(),
   quote: z.string().max(500),
+  snippet: z.string(),
+  contentHash: z.string(),
 });
 export type Citation = z.infer<typeof citationSchema>;
 

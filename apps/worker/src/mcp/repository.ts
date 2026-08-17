@@ -58,6 +58,36 @@ export class McpWikiRepository {
         };
   }
 
+  public async getPageByPath(
+    userId: string,
+    workspaceId: string,
+    path: string,
+  ): Promise<ReadablePage | null> {
+    const normalizedPath = path.trim().replace(/^\/+|\/+$/gu, "").toLowerCase();
+    const match = await this.database
+      .prepare(
+        `SELECT page_id
+           FROM page_aliases
+          WHERE workspace_id = ?1 AND normalized_path = ?2`,
+      )
+      .bind(workspaceId, normalizedPath)
+      .first<{ page_id: string }>();
+    if (match !== null) return this.getPage(userId, workspaceId, match.page_id);
+
+    const slug = normalizedPath.split("/").at(-1) ?? "";
+    const current = await this.database
+      .prepare(
+        `SELECT id FROM pages
+          WHERE workspace_id = ?1 AND lower(slug) = ?2 AND status = 'active'
+          ORDER BY updated_at DESC LIMIT 2`,
+      )
+      .bind(workspaceId, slug)
+      .all<{ id: string }>();
+    const resolved = current.results[0];
+    if (current.results.length !== 1 || resolved === undefined) return null;
+    return this.getPage(userId, workspaceId, resolved.id);
+  }
+
   public async listChildren(
     userId: string,
     workspaceId: string,

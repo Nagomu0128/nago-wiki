@@ -13,9 +13,42 @@
     "AI_GATEWAY_ID": "nago-wiki-dev",
     "ANSWER_MODEL": "@cf/zai-org/glm-4.7-flash",
     "DEFAULT_KNOWLEDGE_MODE": "wiki_plus_general",
+    "ACCESS_AUDIENCE": "configure-in-environment",
+    "ACCESS_ISSUER": "https://configure.cloudflareaccess.com",
+    "ALLOW_DEVELOPMENT_IDENTITY": "true",
+    "WORKSPACE_ID": "00000000-0000-7000-8000-000000000001",
     "GOOGLE_CLIENT_ID": "configure-in-environment",
-    "MCP_PUBLIC_ORIGIN": "http://localhost:8787"
+    "MCP_PUBLIC_ORIGIN": "http://localhost:8787",
+    "WORKER_INTERNAL_URL": "http://localhost:8787"
   },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "PAGE_ROOM",
+        "class_name": "PageRoom"
+      },
+      {
+        "name": "DISCORD_GATEWAY",
+        "class_name": "DiscordGatewayContainer"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["PageRoom", "DiscordGatewayContainer"]
+    }
+  ],
+  "containers": [
+    {
+      "name": "nago-wiki-discord-dev",
+      "class_name": "DiscordGatewayContainer",
+      "image": "../discord-bot/Dockerfile",
+      "image_build_context": "../..",
+      "instance_type": "lite",
+      "max_instances": 1
+    }
+  ],
   "kv_namespaces": [
     {
       "binding": "OAUTH_KV",
@@ -68,5 +101,8 @@
       "binding": "IMPORT_WORKFLOW",
       "class_name": "ImportWorkflow"
     }
-  ]
+  ],
+  "triggers": {
+    "crons": ["*/1 * * * *"]
+  }
 }

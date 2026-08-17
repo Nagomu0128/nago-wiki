@@ -21,10 +21,18 @@ export const botQueryJobSchema = z.object({
   ]),
 });
 
+export const persistVersionJobSchema = z.object({
+  type: z.literal("persist-version"),
+  jobId: z.string().min(1),
+  versionId: z.string().min(1),
+});
+
 export const asyncJobSchema = z.discriminatedUnion("type", [
   indexPageJobSchema,
   botQueryJobSchema,
+  persistVersionJobSchema,
 ]);
 export type AsyncJob = z.infer<typeof asyncJobSchema>;
 export type IndexPageJob = z.infer<typeof indexPageJobSchema>;
 export type BotQueryJob = z.infer<typeof botQueryJobSchema>;
+export type PersistVersionJob = z.infer<typeof persistVersionJobSchema>;

@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import type { AuthenticatedIdentity } from "@nago-wiki/shared";
 
 import { signRealtimeAuthorization } from "./auth";
 import type { PageRoomEnv } from "./page-room";
@@ -22,12 +23,14 @@ export interface RealtimeRoutesOptions {
     request: Request,
     pageId: string,
     env: PageRoomEnv,
+    identity: AuthenticatedIdentity | undefined,
   ) => Promise<RealtimeRouteAuthorization | null>;
   now?: () => number;
 }
 
 interface RealtimeHonoEnv {
   Bindings: PageRoomEnv;
+  Variables: { identity: AuthenticatedIdentity | undefined };
 }
 
 export function createRealtimeRoutes(
@@ -48,6 +51,7 @@ export function createRealtimeRoutes(
       request,
       pageId,
       context.env,
+      context.get("identity"),
     );
     if (authorization === null) {
       return context.text("Not Found", 404);

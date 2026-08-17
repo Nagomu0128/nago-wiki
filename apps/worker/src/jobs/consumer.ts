@@ -1,5 +1,6 @@
 import { asyncJobSchema, type AsyncJob } from "./contracts";
 import { indexPage } from "./index-page";
+import { persistPageVersion } from "./persist-version";
 import { answerBotQuery } from "../bots/service";
 import { sendLineReply } from "../bots/line";
 import type { McpRuntimeEnv } from "../mcp/types";
@@ -49,7 +50,10 @@ async function dispatchJob(environment: McpRuntimeEnv, job: AsyncJob): Promise<v
       if (response !== null) {
         await sendLineReply(environment, job.response.replyToken, response);
       }
+      return;
     }
+    case "persist-version":
+      await persistPageVersion(environment.DB, environment.FILES, job);
   }
 }
 

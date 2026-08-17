@@ -23,6 +23,7 @@ export interface AnswerModel {
     question: string,
     knowledgeMode: AnswerRequest["knowledgeMode"],
     chunks: AuthorizedChunk[],
+    conversation?: AnswerRequest["conversation"],
   ): Promise<z.infer<typeof modelAnswerSchema>>;
 }
 
@@ -37,6 +38,7 @@ export class WorkersAiAnswerModel implements AnswerModel {
     question: string,
     knowledgeMode: AnswerRequest["knowledgeMode"],
     chunks: AuthorizedChunk[],
+    conversation?: AnswerRequest["conversation"],
   ): Promise<z.infer<typeof modelAnswerSchema>> {
     const context = chunks.map((chunk) => ({
       chunkId: chunk.chunkId,
@@ -58,7 +60,12 @@ export class WorkersAiAnswerModel implements AnswerModel {
           },
           {
             role: "user",
-            content: JSON.stringify({ question, knowledgeMode, context }),
+            content: JSON.stringify({
+              question,
+              knowledgeMode,
+              conversation: conversation ?? [],
+              context,
+            }),
           },
         ],
         max_completion_tokens: 1_500,
@@ -127,6 +134,8 @@ export class WikiAnswerService {
       workspaceId: request.workspaceId,
       parentPageId: request.parentPageId,
       tags: request.tags,
+      tagIds: request.tagIds,
+      mode: request.mode ?? "hybrid",
       limit: request.maxCitations,
     });
 
@@ -142,6 +151,7 @@ export class WikiAnswerService {
       request.query,
       request.knowledgeMode,
       search.results,
+      request.conversation,
     );
     const chunksById = new Map(search.results.map((chunk) => [chunk.chunkId, chunk]));
     const citations = generated.citations.flatMap((citation) => {
@@ -156,6 +166,8 @@ export class WikiAnswerService {
               path: chunk.path,
               url: chunk.url,
               quote: citation.quote,
+              snippet: chunk.snippet,
+              contentHash: chunk.contentHash,
             },
           ];
     });

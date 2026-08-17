@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "wrangler deploy --dry-run --outdir dist",
+    "build": "wrangler deploy --dry-run --containers-rollout none --outdir dist",
     "dev": "wrangler dev --local",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit",

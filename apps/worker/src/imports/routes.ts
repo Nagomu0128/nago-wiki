@@ -1,4 +1,5 @@
 import { zValidator } from "@hono/zod-validator";
+import type { AuthenticatedIdentity } from "@nago-wiki/shared";
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
@@ -6,11 +7,16 @@ import { z } from "zod";
 import { exchangeGoogleAuthorizationCode } from "./google-client";
 import { GoogleTokenVault } from "./token-vault";
 import type { ImportWorkflowParams } from "./workflow";
+import { createRealtimeWikiCoreService } from "../core/realtime-mutations";
 import type { McpRuntimeEnv } from "../mcp/types";
 
 interface ImportApi {
   Bindings: McpRuntimeEnv;
-  Variables: { userId: string };
+  Variables: {
+    identity: AuthenticatedIdentity | undefined;
+    requestId: string | undefined;
+    userId: string | undefined;
+  };
 }
 
 interface MemberRow {
@@ -46,12 +52,23 @@ const createImportSchema = z.object({
   }),
 });
 
+const applyImportSchema = z.object({
+  parentId: z.uuid().nullable().optional().default(null),
+  title: z.string().trim().min(1).max(500).optional(),
+  accessMode: z.enum(["workspace", "restricted"]).optional().default("workspace"),
+});
+
 export function createImportRoutes(): Hono<ImportApi> {
   const routes = new Hono<ImportApi>();
 
   routes.get("/imports/google/authorize", async (context) => {
-    const userId = requireUserId(context.get("userId"), context.req.header("x-nago-user-id"));
-    const member = await requireEditor(context.env.DB, userId);
+    const identity = requireImportIdentity(context.get("identity"));
+    const userId = identity.id;
+    const member = await requireEditor(
+      context.env.DB,
+      userId,
+      identity.workspaceId,
+    );
     const returnTo = safeReturnUrl(
       context.req.query("returnTo") ?? `${context.env.MCP_PUBLIC_ORIGIN}/imports`,
       context.env.MCP_PUBLIC_ORIGIN,
@@ -102,8 +119,9 @@ export function createImportRoutes(): Hono<ImportApi> {
   });
 
   routes.post("/imports", zValidator("json", createImportSchema), async (context) => {
-    const userId = requireUserId(context.get("userId"), context.req.header("x-nago-user-id"));
-    await requireEditor(context.env.DB, userId);
+    const identity = requireImportIdentity(context.get("identity"));
+    const userId = identity.id;
+    await requireEditor(context.env.DB, userId, identity.workspaceId);
     const vault = new GoogleTokenVault(
       context.env.OAUTH_KV,
       context.env.TOKEN_ENCRYPTION_KEY,
@@ -112,6 +130,9 @@ export function createImportRoutes(): Hono<ImportApi> {
       throw new HTTPException(409, { message: "Connect Google before importing" });
     }
     const request = context.req.valid("json");
+    if (request.workspaceId !== identity.workspaceId) {
+      throw new HTTPException(403, { message: "Workspace access denied" });
+    }
     const importId = crypto.randomUUID();
     const now = new Date().toISOString();
     await context.env.DB.prepare(
@@ -153,8 +174,13 @@ export function createImportRoutes(): Hono<ImportApi> {
   });
 
   routes.get("/imports/:id", async (context) => {
-    const userId = requireUserId(context.get("userId"), context.req.header("x-nago-user-id"));
-    const member = await activeMember(context.env.DB, userId);
+    const identity = requireImportIdentity(context.get("identity"));
+    const userId = identity.id;
+    const member = await activeMember(
+      context.env.DB,
+      userId,
+      identity.workspaceId,
+    );
     const value = await context.env.DB.prepare(
       `SELECT id, workspace_id, user_id, source_type, source_metadata_json,
               status, report_r2_key, created_at, updated_at, expires_at
@@ -162,7 +188,10 @@ export function createImportRoutes(): Hono<ImportApi> {
     )
       .bind(context.req.param("id"))
       .first<ImportRow>();
-    if (value === null || (value.user_id !== userId && member.role !== "owner")) {
+    if (value?.workspace_id !== identity.workspaceId) {
+      throw new HTTPException(404, { message: "Import not found" });
+    }
+    if (value.user_id !== userId && member.role !== "owner") {
       throw new HTTPException(404, { message: "Import not found" });
     }
     const metadata = z.record(z.string(), z.unknown()).catch({}).parse(
@@ -184,32 +213,118 @@ export function createImportRoutes(): Hono<ImportApi> {
     });
   });
 
+  routes.post(
+    "/imports/:id/apply",
+    zValidator("json", applyImportSchema),
+    async (context) => {
+      const identity = requireImportIdentity(context.get("identity"));
+      await requireEditor(context.env.DB, identity.id, identity.workspaceId);
+      const importId = context.req.param("id");
+      const value = await context.env.DB.prepare(
+        `SELECT id, workspace_id, user_id, source_type, source_metadata_json,
+                status, report_r2_key, created_at, updated_at, expires_at
+           FROM imports WHERE id = ?1`,
+      )
+        .bind(importId)
+        .first<ImportRow>();
+      if (value?.workspace_id !== identity.workspaceId) {
+        throw new HTTPException(404, { message: "Import not found" });
+      }
+      if (value.user_id !== identity.id) {
+        throw new HTTPException(404, { message: "Import not found" });
+      }
+      const metadata = z.record(z.string(), z.unknown()).catch({}).parse(
+        parseJson(value.source_metadata_json),
+      );
+      if (value.status === "applied" && typeof metadata.pageId === "string") {
+        return context.json(
+          await createRealtimeWikiCoreService(context.env).getPage(
+            identity,
+            metadata.pageId,
+          ),
+        );
+      }
+      if (value.status !== "preview_ready") {
+        throw new HTTPException(409, { message: "Import preview is not ready" });
+      }
+      if (value.expires_at !== null && value.expires_at <= new Date().toISOString()) {
+        throw new HTTPException(410, { message: "Import preview has expired" });
+      }
+      const previewKey =
+        typeof metadata.previewKey === "string" ? metadata.previewKey : null;
+      if (previewKey === null) {
+        throw new HTTPException(409, { message: "Import preview is unavailable" });
+      }
+      const preview = await context.env.FILES.get(previewKey);
+      if (preview === null || preview.size > 1_048_576) {
+        throw new HTTPException(409, { message: "Import preview is unavailable" });
+      }
+      const request = context.req.valid("json");
+      const page = await createRealtimeWikiCoreService(context.env).createPage(
+        identity,
+        {
+          parentId: request.parentId,
+          title:
+            request.title ??
+            (typeof metadata.title === "string"
+              ? metadata.title
+              : "Imported Google Document"),
+          bodyMd: await preview.text(),
+          accessMode: request.accessMode,
+        },
+        `import:${importId}`,
+      );
+      await context.env.DB.prepare(
+        `UPDATE imports
+            SET status = 'applied',
+                source_metadata_json = json_set(source_metadata_json, '$.pageId', ?2),
+                updated_at = ?3
+          WHERE id = ?1 AND status = 'preview_ready'`,
+      )
+        .bind(importId, page.page.id, new Date().toISOString())
+        .run();
+      return context.json(page, 201);
+    },
+  );
+
   return routes;
 }
 
-async function requireEditor(database: D1Database, userId: string): Promise<MemberRow> {
-  const member = await activeMember(database, userId);
+async function requireEditor(
+  database: D1Database,
+  userId: string,
+  workspaceId: string,
+): Promise<MemberRow> {
+  const member = await activeMember(database, userId, workspaceId);
   if (member.role === "viewer") {
     throw new HTTPException(403, { message: "Editor permission required" });
   }
   return member;
 }
 
-async function activeMember(database: D1Database, userId: string): Promise<MemberRow> {
+async function activeMember(
+  database: D1Database,
+  userId: string,
+  workspaceId: string,
+): Promise<MemberRow> {
   const member = await database
-    .prepare(`SELECT id, email, role FROM users WHERE id = ?1 AND status = 'active'`)
-    .bind(userId)
+    .prepare(
+      `SELECT id, email, role FROM users
+        WHERE id = ?1 AND workspace_id = ?2 AND status = 'active'`,
+    )
+    .bind(userId, workspaceId)
     .first<MemberRow>();
   if (member === null) throw new HTTPException(401, { message: "Authentication required" });
   return member;
 }
 
-function requireUserId(contextUserId: string | undefined, headerUserId: string | undefined): string {
-  const userId = contextUserId ?? headerUserId;
-  if (userId === undefined || userId.length === 0) {
+function requireImportIdentity(
+  identity: AuthenticatedIdentity | undefined,
+): AuthenticatedIdentity {
+  if (identity === undefined) {
     throw new HTTPException(401, { message: "Authentication required" });
   }
-  return userId;
+  return identity;
 }
 
 function safeReturnUrl(value: string, publicOrigin: string): string {

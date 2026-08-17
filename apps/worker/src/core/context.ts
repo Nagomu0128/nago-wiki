@@ -8,6 +8,7 @@ import { ApiProblem, toApiErrorBody } from "./errors";
 export interface CoreVariables {
   identity: AuthenticatedIdentity | undefined;
   requestId: string | undefined;
+  userId: string | undefined;
 }
 
 export interface CoreHonoEnv {

@@ -42,6 +42,7 @@ const googleUserSchema = z.object({
 
 interface UserRow {
   id: string;
+  workspace_id: string;
   email: string;
   display_name: string;
   role: "owner" | "editor" | "viewer";
@@ -167,11 +168,13 @@ export class McpAuthorizationHandler extends WorkerEntrypoint<McpRuntimeEnv> {
       return new Response("A verified Google email is required", { status: 403 });
     }
     const member = await this.env.DB.prepare(
-      `SELECT id, email, display_name, role
+      `SELECT id, workspace_id, email, display_name, role
          FROM users
-        WHERE lower(email) = lower(?1) AND status = 'active'`,
+        WHERE lower(email) = lower(?1)
+          AND workspace_id = ?2
+          AND status = 'active'`,
     )
-      .bind(googleUser.email)
+      .bind(googleUser.email, this.env.WORKSPACE_ID)
       .first<UserRow>();
     if (member === null) {
       return new Response("This Google account is not an active wiki member", {
@@ -180,10 +183,11 @@ export class McpAuthorizationHandler extends WorkerEntrypoint<McpRuntimeEnv> {
     }
 
     const grantedScopes = pending.data.request.scope.filter(
-      (scope) => scope === "mcp:read",
+      (scope) => scope === "wiki:read",
     );
     const props: McpAuthProps = {
       userId: member.id,
+      workspaceId: member.workspace_id,
       email: member.email,
       displayName: member.display_name,
       role: member.role,
@@ -215,13 +219,13 @@ export function createMcpOAuthProvider(environment: McpRuntimeEnv): OAuthProvide
     authorizeEndpoint: "/authorize",
     tokenEndpoint: "/oauth/token",
     clientRegistrationEndpoint: "/oauth/register",
-    scopesSupported: ["mcp:read"],
+    scopesSupported: ["wiki:read"],
     accessTokenTTL: 3600,
     refreshTokenTTL: 2_592_000,
     resourceMetadata: {
       resource: `${origin}/mcp`,
       authorization_servers: [origin],
-      scopes_supported: ["mcp:read"],
+      scopes_supported: ["wiki:read"],
       bearer_methods_supported: ["header"],
       resource_name: "Nago Wiki",
     },

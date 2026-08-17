@@ -30,6 +30,7 @@ export interface PageRoomEnv {
   DB: D1Database;
   PAGE_ROOM: DurableObjectNamespace<PageRoom>;
   REALTIME_INTERNAL_SECRET: string;
+  ASYNC_JOBS: Queue;
 }
 
 export interface ReplaceMarkdownInput {
@@ -38,6 +39,7 @@ export interface ReplaceMarkdownInput {
   bodyMarkdown: string;
   requestedBy: string;
   expectedBaseRevision: number;
+  reason?: "edit" | "restore" | "import" | "manual";
 }
 
 export type ReplaceMarkdownResult =
@@ -191,6 +193,7 @@ export class PageRoom extends DurableObject<PageRoomEnv> {
       const persisted = this.roomStorage.persistUpdate(
         parsed.update,
         Date.now(),
+        attachment.userId,
       );
       Y.applyUpdate(this.document, parsed.update, webSocket);
       await this.scheduleNextAlarm(persisted.nextFlushAt);
@@ -292,7 +295,12 @@ export class PageRoom extends DurableObject<PageRoomEnv> {
       text.insert(0, input.bodyMarkdown);
     }, input.requestedBy);
     const update = Y.encodeStateAsUpdate(clone, stateVector);
-    const persisted = this.roomStorage.persistUpdate(update, Date.now());
+    const persisted = this.roomStorage.persistUpdate(
+      update,
+      Date.now(),
+      input.requestedBy,
+      input.reason ?? "edit",
+    );
     Y.applyUpdate(this.document, update, input.requestedBy);
     await this.scheduleNextAlarm(persisted.nextFlushAt);
     this.broadcastBinaryUpdate(update);
@@ -396,9 +404,25 @@ export class PageRoom extends DurableObject<PageRoomEnv> {
         bodyMarkdown: pending.bodyMarkdown,
         baseRevision: pending.baseRevision,
         committedAt: now,
+        authorId: pending.authorId,
+        reason: pending.reason,
       });
       if (result.ok) {
         this.roomStorage.completeFlush(pending, result.revision, now);
+        await Promise.all([
+          this.env.ASYNC_JOBS.send({
+            type: "persist-version",
+            jobId: crypto.randomUUID(),
+            versionId: result.versionId,
+          }),
+          this.env.ASYNC_JOBS.send({
+            type: "index-page",
+            jobId: crypto.randomUUID(),
+            workspaceId: meta.workspaceId,
+            pageId: meta.pageId,
+            desiredHash: result.contentHash,
+          }),
+        ]);
       } else {
         this.roomStorage.recordConflict(result.currentRevision, now);
       }

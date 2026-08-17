@@ -10,10 +10,12 @@ export interface CommitCurrentBodyInput {
   bodyMarkdown: string;
   baseRevision: number;
   committedAt: number;
+  authorId?: string;
+  reason?: "edit" | "restore" | "import" | "manual";
 }
 
 export type CommitCurrentBodyResult =
-  | { ok: true; revision: number; contentHash: string }
+  | { ok: true; revision: number; contentHash: string; versionId: string }
   | { ok: false; reason: "conflict"; currentRevision: number };
 
 export interface CurrentBodyAdapter {
@@ -72,25 +74,65 @@ export class D1CurrentBodyAdapter implements CurrentBodyAdapter {
   ): Promise<CommitCurrentBodyResult> {
     const contentHash = await sha256Hex(input.bodyMarkdown);
     const revision = input.baseRevision + 1;
-    const updated = await this.database
-      .prepare(
+    const updatedAt = new Date(input.committedAt).toISOString();
+    const versionId = crypto.randomUUID();
+    const results = await this.database.batch([
+      this.database.prepare(
         `UPDATE pages
-         SET body_md = ?, revision = ?, content_hash = ?, updated_at = ?
+         SET body_md = ?, revision = ?, content_hash = ?, updated_at = ?, last_mutation_id = ?
          WHERE workspace_id = ? AND id = ? AND status = 'active' AND revision = ?
-         RETURNING revision`,
+         `,
       )
       .bind(
         input.bodyMarkdown,
         revision,
         contentHash,
-        new Date(input.committedAt).toISOString(),
+        updatedAt,
+        versionId,
         input.workspaceId,
         input.pageId,
         input.baseRevision,
-      )
-      .first<RevisionRow>();
-    if (updated !== null) {
-      return { ok: true, revision: updated.revision, contentHash };
+      ),
+      this.database.prepare(
+        `INSERT INTO page_versions
+           (id, page_id, revision, r2_key, content_hash, author_id, reason,
+            storage_status, storage_error, created_at)
+         SELECT ?, id, ?, ?, ?, COALESCE(?, created_by), ?, 'pending', NULL, ?
+           FROM pages WHERE id = ? AND revision = ? AND last_mutation_id = ?`,
+      ).bind(
+        versionId,
+        revision,
+        `versions/${input.workspaceId}/${input.pageId}/${String(revision)}.md`,
+        contentHash,
+        input.authorId ?? null,
+        input.reason ?? "edit",
+        updatedAt,
+        input.pageId,
+        revision,
+        versionId,
+      ),
+      this.database.prepare(
+        `INSERT INTO page_version_outbox
+           (version_id, body_md, attempts, available_at, created_at, updated_at)
+         SELECT ?, ?, 0, ?, ?, ? FROM page_versions WHERE id = ?`,
+      ).bind(
+        versionId,
+        input.bodyMarkdown,
+        updatedAt,
+        updatedAt,
+        updatedAt,
+        versionId,
+      ),
+      this.database.prepare(
+        `INSERT INTO index_state
+           (page_id, desired_hash, indexed_hash, status, last_error, updated_at)
+         SELECT ?, ?, NULL, 'pending', NULL, ? FROM page_versions WHERE id = ?
+         ON CONFLICT(page_id) DO UPDATE SET desired_hash = excluded.desired_hash,
+           status = 'pending', last_error = NULL, updated_at = excluded.updated_at`,
+      ).bind(input.pageId, contentHash, updatedAt, versionId),
+    ]);
+    if ((results[0]?.meta.changes ?? 0) === 1) {
+      return { ok: true, revision, contentHash, versionId };
     }
 
     const current = await this.database

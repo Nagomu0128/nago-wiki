@@ -4,7 +4,6 @@ import type { McpRuntimeEnv } from "../mcp/types";
 
 export interface DiscordContainerEnvironment extends McpRuntimeEnv {
   DISCORD_BOT_TOKEN: string;
-  WORKER_INTERNAL_URL: string;
 }
 
 export class DiscordGatewayContainer extends Container<DiscordContainerEnvironment> {

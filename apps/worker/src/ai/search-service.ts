@@ -29,7 +29,7 @@ export interface AiSearchClient {
   }>;
 }
 
-const retrievalVariants: readonly AiSearchOptions["retrieval"][] = [
+const hybridRetrievalVariants: readonly AiSearchOptions["retrieval"][] = [
   { retrieval_type: "hybrid", fusion_method: "rrf" },
   { retrieval_type: "hybrid", fusion_method: "max" },
   { retrieval_type: "vector" },
@@ -46,7 +46,7 @@ export class WikiSearchService {
     const uniqueCandidates = new Map<string, SearchCandidate>();
     const authorized = new Map<string, Awaited<ReturnType<SearchCandidateAuthorizer["authorize"]>>>();
 
-    for (const retrieval of retrievalVariants) {
+    for (const retrieval of retrievalVariants(request.mode ?? "hybrid")) {
       const response = await this.searchClient.search({
         query: request.query,
         ai_search_options: {
@@ -103,6 +103,16 @@ export class WikiSearchService {
       candidateCount: uniqueCandidates.size,
     };
   }
+}
+
+function retrievalVariants(
+  mode: SearchRequest["mode"],
+): readonly AiSearchOptions["retrieval"][] {
+  if (mode === "keyword") {
+    return [{ retrieval_type: "keyword", keyword_match_mode: "or" }];
+  }
+  if (mode === "semantic") return [{ retrieval_type: "vector" }];
+  return hybridRetrievalVariants;
 }
 
 function toCandidate(chunk: SearchChunk): SearchCandidate | null {

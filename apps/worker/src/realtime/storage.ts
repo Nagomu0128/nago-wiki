@@ -15,6 +15,8 @@ interface RoomMetaRow extends Record<string, SqlStorageValue> {
   next_flush_at: number | null;
   retry_count: number;
   initialized: number;
+  last_author_id: string | null;
+  last_reason: string;
 }
 
 interface SnapshotRow extends Record<string, SqlStorageValue> {
@@ -38,6 +40,8 @@ export interface RoomMeta {
   nextFlushAt: number | null;
   retryCount: number;
   initialized: boolean;
+  lastAuthorId: string | null;
+  lastReason: "edit" | "restore" | "import" | "manual";
 }
 
 export interface PendingFlush {
@@ -45,6 +49,8 @@ export interface PendingFlush {
   snapshot: Uint8Array;
   bodyMarkdown: string;
   baseRevision: number;
+  authorId: string;
+  reason: "edit" | "restore" | "import" | "manual";
 }
 
 export interface FlushCompletion {
@@ -62,6 +68,12 @@ export function computeFlushDeadline(
 export function computeRetryAt(now: number, retryCount: number): number {
   const delay = Math.min(2 ** Math.max(0, retryCount) * 1_000, MAX_RETRY_MS);
   return now + delay;
+}
+
+function normalizeReason(value: string): PendingFlush["reason"] {
+  return value === "restore" || value === "import" || value === "manual"
+    ? value
+    : "edit";
 }
 
 export function restoreYDoc(
@@ -114,6 +126,8 @@ export class PageRoomStorage {
         retry_count INTEGER NOT NULL DEFAULT 0,
         last_activity_at INTEGER NOT NULL DEFAULT 0,
         initialized INTEGER NOT NULL DEFAULT 0
+        ,last_author_id TEXT,
+        last_reason TEXT NOT NULL DEFAULT 'edit'
       );
       CREATE TABLE IF NOT EXISTS y_snapshots (
         sequence INTEGER PRIMARY KEY,
@@ -167,6 +181,8 @@ export class PageRoomStorage {
       nextFlushAt: row.next_flush_at,
       retryCount: row.retry_count,
       initialized: row.initialized === 1,
+      lastAuthorId: row.last_author_id,
+      lastReason: normalizeReason(row.last_reason),
     };
   }
 
@@ -216,7 +232,12 @@ export class PageRoomStorage {
     });
   }
 
-  public persistUpdate(update: Uint8Array, now: number): {
+  public persistUpdate(
+    update: Uint8Array,
+    now: number,
+    authorId = "system",
+    reason: PendingFlush["reason"] = "edit",
+  ): {
     sequence: number;
     nextFlushAt: number;
   } {
@@ -236,10 +257,13 @@ export class PageRoomStorage {
       this.sql.exec(
         `UPDATE room_meta
          SET dirty = 1, first_dirty_at = ?, last_update_at = ?,
-             next_flush_at = ?, retry_count = 0, last_activity_at = ?, initialized = 1
+             next_flush_at = ?, retry_count = 0, last_activity_at = ?, initialized = 1,
+             last_author_id = ?, last_reason = ?
          WHERE id = 1`,
         firstDirtyAt,
         now,
+        authorId,
+        reason,
         nextFlushAt,
         now,
       );
@@ -257,11 +281,16 @@ export class PageRoomStorage {
         "SELECT MAX(sequence) AS sequence FROM y_updates",
       )
       .one();
+    if (meta.lastAuthorId === null) {
+      throw new Error("Dirty PageRoom state has no author");
+    }
     return {
       throughSequence: sequenceRow.sequence ?? meta.snapshotSequence,
       snapshot: Y.encodeStateAsUpdate(doc),
       bodyMarkdown: doc.getText("markdown").toJSON(),
       baseRevision: meta.baseRevision,
+      authorId: meta.lastAuthorId,
+      reason: meta.lastReason,
     };
   }
 
