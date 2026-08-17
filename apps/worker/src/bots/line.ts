@@ -74,7 +74,20 @@ export async function handleLineWebhook(
       query,
       response: { kind: "line-reply", replyToken: event.data.replyToken },
     };
-    await environment.ASYNC_JOBS.send(job, { contentType: "json" });
+    try {
+      await environment.ASYNC_JOBS.send(job, { contentType: "json" });
+    } catch (error) {
+      // The provider will retry a non-2xx webhook. Release only this fresh
+      // reservation so that retry can enqueue it instead of treating it as a
+      // successfully accepted duplicate.
+      await environment.DB.prepare(
+        `DELETE FROM bot_events
+          WHERE provider = 'line' AND event_id = ?1 AND status = 'received'`,
+      )
+        .bind(event.data.webhookEventId)
+        .run();
+      throw error;
+    }
   }
   return new Response("OK");
 }

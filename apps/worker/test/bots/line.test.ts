@@ -1,6 +1,12 @@
+import { env } from "cloudflare:workers";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { extractLineQuery, sendLineReply } from "../../src/bots/line";
+import {
+  extractLineQuery,
+  handleLineWebhook,
+  sendLineReply,
+} from "../../src/bots/line";
+import type { McpRuntimeEnv } from "../../src/mcp/types";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -49,4 +55,75 @@ describe("LINE mention extraction", () => {
       "https://api.line.me/v2/bot/message/push",
     );
   });
+
+  it("releases the event reservation when Queue enqueue fails", async () => {
+    await env.DB.prepare(
+      "DELETE FROM bot_events WHERE provider = 'line' AND event_id = ?1",
+    )
+      .bind("line-event-retry")
+      .run();
+    const body = JSON.stringify({
+      events: [
+        {
+          type: "message",
+          webhookEventId: "line-event-retry",
+          timestamp: Date.now(),
+          replyToken: "reply-token",
+          source: { type: "user", userId: "line-user" },
+          message: { type: "text", text: "質問" },
+        },
+      ],
+    });
+    const secret = "line-secret";
+    const signature = await lineSignature(body, secret);
+    let queueAvailable = false;
+    const send = vi.fn(() => queueAvailable
+      ? Promise.resolve()
+      : Promise.reject(new Error("queue unavailable")));
+    const environment = {
+      DB: env.DB,
+      ASYNC_JOBS: { send },
+      LINE_CHANNEL_SECRET: secret,
+    } as unknown as McpRuntimeEnv;
+    const request = () => new Request("https://wiki.example/webhooks/line", {
+      method: "POST",
+      headers: { "x-line-signature": signature },
+      body,
+    });
+
+    await expect(handleLineWebhook(request(), environment)).rejects.toThrow(
+      "queue unavailable",
+    );
+    await expect(
+      env.DB.prepare(
+        "SELECT event_id FROM bot_events WHERE provider = 'line' AND event_id = ?1",
+      )
+        .bind("line-event-retry")
+        .first(),
+    ).resolves.toBeNull();
+
+    queueAvailable = true;
+    await expect(handleLineWebhook(request(), environment)).resolves.toMatchObject({
+      status: 200,
+    });
+    expect(send).toHaveBeenCalledTimes(2);
+  });
 });
+
+async function lineSignature(body: string, secret: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const digest = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    new TextEncoder().encode(body),
+  );
+  let binary = "";
+  for (const byte of new Uint8Array(digest)) binary += String.fromCodePoint(byte);
+  return btoa(binary);
+}

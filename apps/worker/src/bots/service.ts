@@ -21,6 +21,11 @@ interface AllowlistRow {
   workspace_id: string;
 }
 
+interface BotEventReplayRow {
+  status: "received" | "processing" | "completed" | "failed" | "ignored";
+  response_text: string | null;
+}
+
 export async function reserveBotEvent(
   database: D1Database,
   provider: BotQueryInput["provider"],
@@ -48,6 +53,15 @@ export async function answerBotQuery(
   environment: McpRuntimeEnv,
   input: BotQueryInput,
 ): Promise<string | null> {
+  const replay = await environment.DB.prepare(
+    `SELECT status, response_text FROM bot_events
+      WHERE provider = ?1 AND event_id = ?2`,
+  )
+    .bind(input.provider, input.eventId)
+    .first<BotEventReplayRow>();
+  if (replay?.status === "completed") return replay.response_text;
+  if (replay?.status === "ignored") return null;
+
   const workspaceId = await resolveWorkspace(
     environment.DB,
     input.provider,
@@ -124,6 +138,7 @@ export async function answerBotQuery(
       maxCitations: 6,
     });
     await recordChatAudit(environment.DB, {
+      id: `bot:${input.provider}:${input.eventId}`,
       provider: input.provider,
       userId,
       query: input.query,
@@ -214,7 +229,8 @@ async function finishEvent(
   await database
     .prepare(
       `UPDATE bot_events
-          SET user_id = ?3, status = ?4, response_hash = ?5, updated_at = ?6
+          SET user_id = ?3, status = ?4, response_hash = ?5,
+              response_text = ?6, updated_at = ?7
         WHERE provider = ?1 AND event_id = ?2`,
     )
     .bind(
@@ -223,6 +239,7 @@ async function finishEvent(
       userId,
       status,
       responseHash,
+      response,
       new Date().toISOString(),
     )
     .run();

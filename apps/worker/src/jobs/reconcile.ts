@@ -56,6 +56,9 @@ export async function reconcilePendingJobs(environment: McpRuntimeEnv): Promise<
   }
   const auditExpiry = new Date().toISOString();
   const staleRateWindow = Date.now() - 60 * 60 * 1_000;
+  const expiredBotEvents = new Date(
+    Date.now() - 30 * 24 * 60 * 60 * 1_000,
+  ).toISOString();
   await environment.DB.batch([
     environment.DB.prepare(`DELETE FROM chat_audit WHERE expires_at <= ?1`).bind(
       auditExpiry,
@@ -67,5 +70,8 @@ export async function reconcilePendingJobs(environment: McpRuntimeEnv): Promise<
       `DELETE FROM account_link_codes
         WHERE expires_at <= ?1 OR consumed_at IS NOT NULL`,
     ).bind(auditExpiry),
+    environment.DB.prepare(
+      `DELETE FROM bot_events WHERE created_at < ?1`,
+    ).bind(expiredBotEvents),
   ]);
 }

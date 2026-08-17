@@ -221,6 +221,9 @@ CREATE TABLE bot_events (
   user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
   status TEXT NOT NULL CHECK (status IN ('received', 'processing', 'completed', 'failed', 'ignored')),
   response_hash TEXT,
+  response_text TEXT CHECK (
+    response_text IS NULL OR length(CAST(response_text AS BLOB)) <= 16384
+  ),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   PRIMARY KEY (provider, event_id)
