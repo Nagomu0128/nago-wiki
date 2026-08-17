@@ -46,6 +46,7 @@ CREATE TABLE pages (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   trashed_at TEXT,
+  last_mutation_id TEXT,
   UNIQUE (id, workspace_id),
   FOREIGN KEY (parent_id, workspace_id) REFERENCES pages(id, workspace_id) ON DELETE RESTRICT,
   CHECK ((status = 'active' AND trashed_at IS NULL) OR (status = 'trashed' AND trashed_at IS NOT NULL)),
@@ -57,6 +58,19 @@ CREATE UNIQUE INDEX pages_active_sibling_slug_unique
   WHERE status = 'active';
 CREATE INDEX pages_workspace_parent_idx ON pages(workspace_id, parent_id, status);
 CREATE INDEX pages_workspace_updated_idx ON pages(workspace_id, status, updated_at DESC);
+
+CREATE TABLE page_create_idempotency (
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  key_hash TEXT NOT NULL CHECK (length(key_hash) = 64),
+  request_hash TEXT NOT NULL CHECK (length(request_hash) = 64),
+  page_id TEXT NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  PRIMARY KEY (user_id, key_hash)
+) STRICT, WITHOUT ROWID;
+
+CREATE INDEX page_create_idempotency_expires_idx
+  ON page_create_idempotency(expires_at);
 
 CREATE TABLE page_acl (
   page_id TEXT NOT NULL REFERENCES pages(id) ON DELETE CASCADE,

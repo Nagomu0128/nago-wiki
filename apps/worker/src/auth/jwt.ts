@@ -83,12 +83,17 @@ export class CloudflareAccessJwtVerifier implements AccessJwtVerifier {
     const header = parseHeader(decodeJson(encodedHeader));
     const claims = parseClaims(decodeJson(encodedPayload));
     const key = await this.#getSigningKey(header.kid);
-    const validSignature = await crypto.subtle.verify(
-      "RSASSA-PKCS1-v1_5",
-      key,
-      decodeBase64Url(encodedSignature),
-      new TextEncoder().encode(`${encodedHeader}.${encodedPayload}`),
-    );
+    let validSignature: boolean;
+    try {
+      validSignature = await crypto.subtle.verify(
+        "RSASSA-PKCS1-v1_5",
+        key,
+        decodeBase64Url(encodedSignature),
+        new TextEncoder().encode(`${encodedHeader}.${encodedPayload}`),
+      );
+    } catch {
+      throw invalidJwt();
+    }
     if (!validSignature) {
       throw invalidJwt();
     }
@@ -108,9 +113,18 @@ export class CloudflareAccessJwtVerifier implements AccessJwtVerifier {
   }
 
   async #getSigningKey(kid: string): Promise<CryptoKey> {
-    const response = await this.#fetcher(this.#jwksUrl, {
-      headers: { Accept: "application/json" },
-    });
+    let response: Response;
+    try {
+      response = await this.#fetcher(this.#jwksUrl, {
+        headers: { Accept: "application/json" },
+      });
+    } catch {
+      throw new ApiProblem(
+        "AUTH_CONFIGURATION_ERROR",
+        503,
+        "Authentication keys are temporarily unavailable",
+      );
+    }
     if (!response.ok) {
       throw new ApiProblem(
         "AUTH_CONFIGURATION_ERROR",
@@ -140,13 +154,17 @@ export class CloudflareAccessJwtVerifier implements AccessJwtVerifier {
       throw invalidJwt();
     }
 
-    return crypto.subtle.importKey(
-      "jwk",
-      jwk,
-      { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
-      false,
-      ["verify"],
-    );
+    try {
+      return await crypto.subtle.importKey(
+        "jwk",
+        jwk,
+        { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+        false,
+        ["verify"],
+      );
+    } catch {
+      throw invalidKeysResponse();
+    }
   }
 }
 

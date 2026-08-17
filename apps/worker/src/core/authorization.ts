@@ -19,18 +19,21 @@ export class AuthorizationService {
     if (page?.workspaceId !== identity.workspaceId) return "none";
     if (identity.role === "owner") return "owner";
 
-    const restrictedPageId =
-      await this.repository.getNearestRestrictedAncestor(
+    const restrictedPermissions =
+      await this.repository.getRestrictedAncestorPermissions(
         page.id,
         identity.workspaceId,
+        identity.id,
       );
-    if (restrictedPageId === null) {
+    if (restrictedPermissions.length === 0) {
       return identity.role;
     }
-    const aclPermission = await this.repository.getAclPermission(
-      restrictedPageId,
-      identity.id,
-    );
+    if (restrictedPermissions.some((permission) => permission === null)) {
+      return "none";
+    }
+    const aclPermission = restrictedPermissions.includes("viewer")
+      ? "viewer"
+      : "editor";
     return clampPermissionToWorkspaceRole(identity.role, aclPermission);
   }
 }
