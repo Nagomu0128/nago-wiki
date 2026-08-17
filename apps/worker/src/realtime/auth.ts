@@ -6,6 +6,7 @@ import {
 
 const TOKEN_VERSION = "v1";
 const MAX_CLOCK_SKEW_MS = 30_000;
+const MAX_TOKEN_AGE_MS = 60_000;
 
 function toBase64Url(bytes: Uint8Array): string {
   let binary = "";
@@ -78,13 +79,18 @@ export async function verifyRealtimeAuthorization(
     return null;
   }
 
-  const key = await importHmacKey(secret);
-  const valid = await crypto.subtle.verify(
-    "HMAC",
-    key,
-    asArrayBuffer(fromBase64Url(signature)),
-    new TextEncoder().encode(`${version}.${payload}`),
-  );
+  let valid: boolean;
+  try {
+    const key = await importHmacKey(secret);
+    valid = await crypto.subtle.verify(
+      "HMAC",
+      key,
+      asArrayBuffer(fromBase64Url(signature)),
+      new TextEncoder().encode(`${version}.${payload}`),
+    );
+  } catch {
+    return null;
+  }
   if (!valid) {
     return null;
   }
@@ -99,7 +105,12 @@ export async function verifyRealtimeAuthorization(
   if (!isAuthorization(parsed)) {
     return null;
   }
-  if (parsed.issuedAt > now + MAX_CLOCK_SKEW_MS || parsed.expiresAt <= now) {
+  if (
+    parsed.issuedAt > now + MAX_CLOCK_SKEW_MS ||
+    parsed.issuedAt < now - MAX_TOKEN_AGE_MS ||
+    parsed.expiresAt <= now ||
+    parsed.expiresAt <= parsed.issuedAt
+  ) {
     return null;
   }
 

@@ -78,6 +78,13 @@ export function restoreYDoc(
   return doc;
 }
 
+export function createCompactionSnapshot(
+  snapshot: Uint8Array | null,
+  updates: readonly Uint8Array[],
+): Uint8Array {
+  return Y.encodeStateAsUpdate(restoreYDoc(snapshot, updates));
+}
+
 function asArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   return bytes.buffer.slice(
     bytes.byteOffset,
