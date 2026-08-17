@@ -25,6 +25,29 @@ const CLOSE_UNAUTHORIZED = 4401;
 const CLOSE_FORBIDDEN = 4403;
 const CLOSE_INVALID_MESSAGE = 4400;
 const MAX_MARKDOWN_BYTES = 1_048_576;
+const MAX_REALTIME_UPDATE_BYTES = MAX_MARKDOWN_BYTES + 65_536;
+const MAX_YDOC_STATE_BYTES = MAX_MARKDOWN_BYTES * 4;
+
+export function validateRealtimeUpdate(
+  document: Y.Doc,
+  update: Uint8Array,
+): void {
+  if (update.byteLength > MAX_REALTIME_UPDATE_BYTES) {
+    throw new Error("Realtime update exceeds the allowed size");
+  }
+  const candidate = new Y.Doc();
+  Y.applyUpdate(candidate, Y.encodeStateAsUpdate(document));
+  Y.applyUpdate(candidate, update);
+  if (
+    new TextEncoder().encode(candidate.getText(REALTIME_TEXT_KEY).toJSON())
+      .byteLength > MAX_MARKDOWN_BYTES
+  ) {
+    throw new Error("Markdown exceeds the 1 MiB page limit");
+  }
+  if (Y.encodeStateAsUpdate(candidate).byteLength > MAX_YDOC_STATE_BYTES) {
+    throw new Error("Realtime document state exceeds the allowed size");
+  }
+}
 
 export interface PageRoomEnv {
   DB: D1Database;
@@ -162,6 +185,15 @@ export class PageRoom extends DurableObject<PageRoomEnv> {
       webSocket.close(CLOSE_INVALID_MESSAGE, "Binary messages required");
       return;
     }
+    if (message.byteLength > MAX_REALTIME_UPDATE_BYTES + 32) {
+      sendControl(webSocket, {
+        type: "error",
+        code: "INVALID_MESSAGE",
+        message: "Realtime update exceeds the allowed size",
+      });
+      webSocket.close(CLOSE_INVALID_MESSAGE, "Update too large");
+      return;
+    }
 
     try {
       const parsed = parseRealtimeMessage(
@@ -187,6 +219,18 @@ export class PageRoom extends DurableObject<PageRoomEnv> {
           code: "INVALID_MESSAGE",
           message: "Unsupported realtime protocol message",
         });
+        return;
+      }
+
+      try {
+        validateRealtimeUpdate(this.document, parsed.update);
+      } catch (error) {
+        sendControl(webSocket, {
+          type: "error",
+          code: "INVALID_MESSAGE",
+          message: error instanceof Error ? error.message : "Update is too large",
+        });
+        webSocket.close(CLOSE_INVALID_MESSAGE, "Update rejected");
         return;
       }
 

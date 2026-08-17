@@ -8,6 +8,7 @@ import {
   realtimeUpdateMetaBindings,
   restoreYDoc,
 } from "../src/realtime/storage";
+import { validateRealtimeUpdate } from "../src/realtime/page-room";
 
 describe("realtime persistence policy", () => {
   it("flushes after two quiet seconds or fifteen dirty seconds", () => {
@@ -44,5 +45,37 @@ describe("realtime persistence policy", () => {
     expect(restored.getText("markdown").toJSON()).toBe(
       "base update pending",
     );
+  });
+
+  it("rejects a Yjs update whose resulting Markdown exceeds one MiB", () => {
+    const current = new Y.Doc();
+    current.getText("markdown").insert(0, "base");
+    const next = new Y.Doc();
+    Y.applyUpdate(next, Y.encodeStateAsUpdate(current));
+    const stateVector = Y.encodeStateVector(current);
+    next.getText("markdown").insert(4, "x".repeat(1_048_576));
+    const update = Y.encodeStateAsUpdate(next, stateVector);
+
+    expect(() => { validateRealtimeUpdate(current, update); }).toThrow(
+      "Markdown exceeds the 1 MiB page limit",
+    );
+    expect(current.getText("markdown").toJSON()).toBe("base");
+  });
+
+  it("accepts a bounded Markdown update without mutating the source document", () => {
+    const current = new Y.Doc();
+    current.getText("markdown").insert(0, "base");
+    const next = new Y.Doc();
+    Y.applyUpdate(next, Y.encodeStateAsUpdate(current));
+    const stateVector = Y.encodeStateVector(current);
+    next.getText("markdown").insert(4, " update");
+
+    expect(() => {
+      validateRealtimeUpdate(
+        current,
+        Y.encodeStateAsUpdate(next, stateVector),
+      );
+    }).not.toThrow();
+    expect(current.getText("markdown").toJSON()).toBe("base");
   });
 });
