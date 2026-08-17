@@ -1,12 +1,24 @@
 import { zValidator } from "@hono/zod-validator";
-import type { AuthenticatedIdentity } from "@nago-wiki/shared";
+import {
+  applyImportRequestSchema,
+  type AuthenticatedIdentity,
+  type ImportSourceType,
+} from "@nago-wiki/shared";
 import { Hono } from "hono";
+import type { MiddlewareHandler } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 
+import {
+  createImportSchema,
+  type CreateImportRequest,
+  type ImportWorkflowSource,
+} from "./contracts";
+import { safeImportFilename } from "./filename";
 import { exchangeGoogleAuthorizationCode } from "./google-client";
 import { GoogleTokenVault } from "./token-vault";
 import type { ImportWorkflowParams } from "./workflow";
+import { createUuidV7 } from "../core/ids";
 import { createRealtimeWikiCoreService } from "../core/realtime-mutations";
 import type { McpRuntimeEnv } from "../mcp/types";
 
@@ -44,22 +56,18 @@ const googleStateSchema = z.object({
   returnTo: z.url(),
 });
 
-const createImportSchema = z.object({
-  workspaceId: z.string().min(1).max(128),
-  source: z.object({
-    type: z.literal("google_docs"),
-    documentId: z.string().min(1).max(256),
-  }),
-});
-
-const applyImportSchema = z.object({
-  parentId: z.uuid().nullable().optional().default(null),
-  title: z.string().trim().min(1).max(500).optional(),
-  accessMode: z.enum(["workspace", "restricted"]).optional().default("workspace"),
-});
-
 export function createImportRoutes(): Hono<ImportApi> {
   const routes = new Hono<ImportApi>();
+  const enforceImportBodyLimit: MiddlewareHandler<ImportApi> = async (
+    context,
+    next,
+  ) => {
+    const length = Number(context.req.header("Content-Length"));
+    if (Number.isFinite(length) && length > 30 * 1024 * 1024) {
+      throw new HTTPException(413, { message: "Import request is too large" });
+    }
+    await next();
+  };
 
   routes.get("/imports/google/authorize", async (context) => {
     const identity = requireImportIdentity(context.get("identity"));
@@ -118,60 +126,83 @@ export function createImportRoutes(): Hono<ImportApi> {
     return context.redirect(redirect.toString(), 302);
   });
 
-  routes.post("/imports", zValidator("json", createImportSchema), async (context) => {
-    const identity = requireImportIdentity(context.get("identity"));
-    const userId = identity.id;
-    await requireEditor(context.env.DB, userId, identity.workspaceId);
-    const vault = new GoogleTokenVault(
-      context.env.OAUTH_KV,
-      context.env.TOKEN_ENCRYPTION_KEY,
-    );
-    if ((await vault.get(userId)) === null) {
-      throw new HTTPException(409, { message: "Connect Google before importing" });
-    }
-    const request = context.req.valid("json");
-    if (request.workspaceId !== identity.workspaceId) {
-      throw new HTTPException(403, { message: "Workspace access denied" });
-    }
-    const importId = crypto.randomUUID();
-    const now = new Date().toISOString();
-    await context.env.DB.prepare(
-      `INSERT INTO imports (
-         id, workspace_id, user_id, source_type, source_metadata_json,
-         status, created_at, updated_at
-       ) VALUES (?1, ?2, ?3, 'google_docs', ?4, 'queued', ?5, ?5)`,
-    )
-      .bind(
+  routes.post(
+    "/imports",
+    enforceImportBodyLimit,
+    zValidator("json", createImportSchema),
+    async (context) => {
+      const identity = requireImportIdentity(context.get("identity"));
+      const userId = identity.id;
+      await requireEditor(context.env.DB, userId, identity.workspaceId);
+      const request = context.req.valid("json");
+      if (request.sourceType === "google_docs") {
+        const vault = new GoogleTokenVault(
+          context.env.OAUTH_KV,
+          context.env.TOKEN_ENCRYPTION_KEY,
+        );
+        if ((await vault.get(userId)) === null) {
+          throw new HTTPException(409, {
+            message: "Connect Google before importing",
+          });
+        }
+      }
+      const importId = createUuidV7();
+      const prepared = await prepareImportSource(
+        context.env,
+        identity.workspaceId,
         importId,
-        request.workspaceId,
-        userId,
-        JSON.stringify({ documentId: request.source.documentId }),
-        now,
-      )
-      .run();
-
-    const parameters: ImportWorkflowParams = {
-      importId,
-      workspaceId: request.workspaceId,
-      requestedBy: userId,
-      source: request.source,
-    };
-    try {
-      await context.env.IMPORT_WORKFLOW.create({
-        id: `import-${importId}`,
-        params: parameters,
-        retention: { successRetention: "7 days", errorRetention: "30 days" },
-      });
-    } catch (error) {
+        request,
+      );
+      const now = new Date().toISOString();
       await context.env.DB.prepare(
-        `UPDATE imports SET status = 'failed', updated_at = ?2 WHERE id = ?1`,
+        `INSERT INTO imports (
+           id, workspace_id, user_id, source_type, source_metadata_json,
+           status, created_at, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6, ?6)`,
       )
-        .bind(importId, new Date().toISOString())
+        .bind(
+          importId,
+          identity.workspaceId,
+          userId,
+          databaseSourceType(request.sourceType),
+          JSON.stringify(prepared.metadata),
+          now,
+        )
         .run();
-      throw error;
-    }
-    return context.json({ id: importId, status: "queued" as const }, 202);
-  });
+
+      const parameters: ImportWorkflowParams = {
+        importId,
+        workspaceId: identity.workspaceId,
+        requestedBy: userId,
+        source: prepared.workflowSource,
+      };
+      try {
+        await context.env.IMPORT_WORKFLOW.create({
+          id: `import-${importId}`,
+          params: parameters,
+          retention: { successRetention: "7 days", errorRetention: "30 days" },
+        });
+      } catch (error) {
+        await context.env.DB.prepare(
+          `UPDATE imports SET status = 'failed', updated_at = ?2 WHERE id = ?1`,
+        )
+          .bind(importId, new Date().toISOString())
+          .run();
+        throw error;
+      }
+      return context.json(
+        {
+          id: importId,
+          sourceType: request.sourceType,
+          sourceLabel: sourceLabel(prepared.metadata, request.sourceType),
+          status: "queued" as const,
+          warnings: [],
+          createdAt: now,
+        },
+        202,
+      );
+    },
+  );
 
   routes.get("/imports/:id", async (context) => {
     const identity = requireImportIdentity(context.get("identity"));
@@ -197,25 +228,12 @@ export function createImportRoutes(): Hono<ImportApi> {
     const metadata = z.record(z.string(), z.unknown()).catch({}).parse(
       parseJson(value.source_metadata_json),
     );
-    const previewKey = typeof metadata.previewKey === "string" ? metadata.previewKey : null;
-    const preview = previewKey === null ? null : await context.env.FILES.get(previewKey);
-    return context.json({
-      id: value.id,
-      workspaceId: value.workspace_id,
-      sourceType: value.source_type,
-      status: value.status,
-      metadata,
-      previewMarkdown: preview === null ? null : await preview.text(),
-      reportKey: value.report_r2_key,
-      createdAt: value.created_at,
-      updatedAt: value.updated_at,
-      expiresAt: value.expires_at,
-    });
+    return context.json(await importJobResponse(context.env.FILES, value, metadata));
   });
 
   routes.post(
     "/imports/:id/apply",
-    zValidator("json", applyImportSchema),
+    zValidator("json", applyImportRequestSchema),
     async (context) => {
       const identity = requireImportIdentity(context.get("identity"));
       await requireEditor(context.env.DB, identity.id, identity.workspaceId);
@@ -264,15 +282,17 @@ export function createImportRoutes(): Hono<ImportApi> {
         identity,
         {
           parentId: request.parentId,
-          title:
-            request.title ??
-            (typeof metadata.title === "string"
-              ? metadata.title
-              : "Imported Google Document"),
+          title: request.title,
           bodyMd: await preview.text(),
-          accessMode: request.accessMode,
+          accessMode: "workspace",
         },
         `import:${importId}`,
+      );
+      await applyAcceptedTags(
+        context.env.DB,
+        identity.workspaceId,
+        page.page.id,
+        request.acceptedTags,
       );
       await context.env.DB.prepare(
         `UPDATE imports
@@ -283,7 +303,13 @@ export function createImportRoutes(): Hono<ImportApi> {
       )
         .bind(importId, page.page.id, new Date().toISOString())
         .run();
-      return context.json(page, 201);
+      return context.json(
+        await createRealtimeWikiCoreService(context.env).getPage(
+          identity,
+          page.page.id,
+        ),
+        201,
+      );
     },
   );
 
@@ -349,4 +375,253 @@ function parseJson(value: string | null): unknown {
   } catch {
     return null;
   }
+}
+
+async function importJobResponse(
+  bucket: R2Bucket,
+  row: ImportRow,
+  metadata: Record<string, unknown>,
+): Promise<{
+  id: string;
+  sourceType: ImportSourceType;
+  sourceLabel: string;
+  status: "queued" | "running" | "preview_ready" | "applied" | "failed";
+  previewMarkdown?: string;
+  warnings: string[];
+  suggestedTitle?: string;
+  error?: { code: string; message: string };
+  createdAt: string;
+}> {
+  const previewKey = typeof metadata.previewKey === "string" ? metadata.previewKey : null;
+  const previewObject = previewKey === null ? null : await bucket.get(previewKey);
+  const previewMarkdown =
+    previewObject === null || previewObject.size > 1_048_576
+      ? undefined
+      : await previewObject.text();
+  const reportObject =
+    row.report_r2_key === null ? null : await bucket.get(row.report_r2_key);
+  const report = z
+    .object({ warnings: z.array(z.string()).catch([]) })
+    .catch({ warnings: [] })
+    .parse(
+      reportObject === null || reportObject.size > 1_048_576
+        ? null
+        : await reportObject.json<unknown>(),
+    );
+  const errorMessage = typeof metadata.error === "string" ? metadata.error : undefined;
+  const suggestedTitle =
+    typeof metadata.title === "string" ? metadata.title : undefined;
+  return {
+    id: row.id,
+    sourceType: publicSourceType(row.source_type),
+    sourceLabel: sourceLabel(metadata, publicSourceType(row.source_type)),
+    status: publicImportStatus(row.status),
+    ...(previewMarkdown === undefined ? {} : { previewMarkdown }),
+    warnings: report.warnings,
+    ...(suggestedTitle === undefined ? {} : { suggestedTitle }),
+    ...(errorMessage === undefined
+      ? {}
+      : { error: { code: "IMPORT_FAILED", message: errorMessage } }),
+    createdAt: row.created_at,
+  };
+}
+
+function publicImportStatus(
+  value: string,
+): "queued" | "running" | "preview_ready" | "applied" | "failed" {
+  if (
+    value === "queued" ||
+    value === "running" ||
+    value === "preview_ready" ||
+    value === "applied"
+  ) {
+    return value;
+  }
+  return "failed";
+}
+
+function publicSourceType(value: string): ImportSourceType {
+  if (value === "public_url") return "url";
+  if (
+    value === "google_docs" ||
+    value === "markdown" ||
+    value === "pdf" ||
+    value === "paste"
+  ) {
+    return value;
+  }
+  throw new Error("Import source type is invalid");
+}
+
+function databaseSourceType(value: ImportSourceType): string {
+  return value === "url" ? "public_url" : value;
+}
+
+function sourceLabel(
+  metadata: Record<string, unknown>,
+  sourceType: ImportSourceType,
+): string {
+  if (typeof metadata.title === "string") return metadata.title;
+  if (typeof metadata.filename === "string") return metadata.filename;
+  if (typeof metadata.sourceUrl === "string") return metadata.sourceUrl;
+  if (typeof metadata.documentId === "string") {
+    return `Google Document: ${metadata.documentId}`;
+  }
+  return sourceType === "google_docs" ? "Google Document" : "Imported Document";
+}
+
+async function applyAcceptedTags(
+  database: D1Database,
+  workspaceId: string,
+  pageId: string,
+  acceptedTags: string[],
+): Promise<void> {
+  const tags = new Map<string, string>();
+  for (const tag of acceptedTags) {
+    const name = tag.normalize("NFKC").trim();
+    if (name.length > 0) tags.set(name.toLowerCase(), name);
+  }
+  if (tags.size === 0) return;
+  const now = new Date().toISOString();
+  const statements: D1PreparedStatement[] = [];
+  for (const [normalizedName, name] of tags) {
+    statements.push(
+      database
+        .prepare(
+          `INSERT INTO tags (
+             id, workspace_id, name, normalized_name, created_at
+           ) VALUES (?1, ?2, ?3, ?4, ?5)
+           ON CONFLICT(workspace_id, normalized_name) DO NOTHING`,
+        )
+        .bind(createUuidV7(), workspaceId, name, normalizedName, now),
+      database
+        .prepare(
+          `INSERT INTO page_tags (page_id, tag_id)
+           SELECT ?1, id FROM tags
+            WHERE workspace_id = ?2 AND normalized_name = ?3
+           ON CONFLICT(page_id, tag_id) DO NOTHING`,
+        )
+        .bind(pageId, workspaceId, normalizedName),
+    );
+  }
+  await database.batch(statements);
+}
+
+async function prepareImportSource(
+  environment: McpRuntimeEnv,
+  workspaceId: string,
+  importId: string,
+  request: CreateImportRequest,
+): Promise<{
+  metadata: Record<string, string>;
+  workflowSource: ImportWorkflowSource;
+}> {
+  if (request.sourceType === "google_docs") {
+    return {
+      metadata: { documentId: request.documentId },
+      workflowSource: {
+        sourceType: "google_docs",
+        documentId: request.documentId,
+      },
+    };
+  }
+  if (request.sourceType === "url") {
+    return {
+      metadata: { sourceUrl: request.sourceUrl },
+      workflowSource: {
+        sourceType: "public_url",
+        sourceUrl: request.sourceUrl,
+      },
+    };
+  }
+
+  const prepared =
+    request.sourceType === "pdf"
+      ? preparePdf(request.content, request.filename)
+      : prepareTextSource(
+          request.content,
+          request.sourceType,
+          request.filename,
+        );
+  const sourceKey = `imports/${workspaceId}/${importId}/source/${prepared.filename}`;
+  await environment.FILES.put(sourceKey, prepared.bytes, {
+    httpMetadata: { contentType: prepared.contentType },
+    customMetadata: {
+      import_id: importId,
+      source_type: request.sourceType,
+    },
+  });
+  return {
+    metadata: { filename: prepared.filename },
+    workflowSource: {
+      sourceType: request.sourceType,
+      sourceKey,
+      filename: prepared.filename,
+      contentType: prepared.contentType,
+    },
+  };
+}
+
+function prepareTextSource(
+  content: string,
+  sourceType: "markdown" | "paste",
+  filename: string | undefined,
+): { bytes: Uint8Array; filename: string; contentType: string } {
+  const bytes = new TextEncoder().encode(content);
+  const limit = sourceType === "markdown" ? 1_048_576 : 5 * 1024 * 1024;
+  if (bytes.byteLength > limit) {
+    throw new HTTPException(413, { message: "Import content is too large" });
+  }
+  const html = sourceType === "paste" && looksLikeHtml(content, filename);
+  return {
+    bytes,
+    filename: safeImportFilename(
+      filename ?? (html ? "pasted-content.html" : "pasted-content.txt"),
+    ),
+    contentType: html
+      ? "text/html; charset=utf-8"
+      : sourceType === "markdown"
+        ? "text/markdown; charset=utf-8"
+        : "text/plain; charset=utf-8",
+  };
+}
+
+function preparePdf(
+  content: string,
+  filename: string,
+): { bytes: Uint8Array; filename: string; contentType: string } {
+  const payload = content.replace(/^data:application\/pdf;base64,/iu, "").replaceAll(/\s/gu, "");
+  if (!/^[A-Za-z\d+/]*={0,2}$/u.test(payload) || payload.length % 4 !== 0) {
+    throw new HTTPException(400, { message: "PDF content must be valid base64" });
+  }
+  let decoded: string;
+  try {
+    decoded = atob(payload);
+  } catch {
+    throw new HTTPException(400, { message: "PDF content must be valid base64" });
+  }
+  if (decoded.length > 20 * 1024 * 1024) {
+    throw new HTTPException(413, { message: "PDF exceeds the 20 MiB import limit" });
+  }
+  const bytes = Uint8Array.from(decoded, (character) => character.codePointAt(0) ?? 0);
+  if (new TextDecoder().decode(bytes.subarray(0, 5)) !== "%PDF-") {
+    throw new HTTPException(400, { message: "PDF content has an invalid signature" });
+  }
+  const normalizedFilename = safeImportFilename(filename);
+  return {
+    bytes,
+    filename: normalizedFilename.toLowerCase().endsWith(".pdf")
+      ? normalizedFilename
+      : `${normalizedFilename}.pdf`,
+    contentType: "application/pdf",
+  };
+}
+
+function looksLikeHtml(content: string, filename: string | undefined): boolean {
+  return (
+    filename?.toLowerCase().endsWith(".html") === true ||
+    /<\s*(?:!doctype|html|head|body|article|main|p|div|h[1-6]|ul|ol|table|a)\b/iu.test(
+      content,
+    )
+  );
 }
