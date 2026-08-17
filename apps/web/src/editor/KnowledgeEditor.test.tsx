@@ -90,6 +90,7 @@ describe("KnowledgeEditor", () => {
     view = await renderView(<KnowledgeEditor api={api} realtimeFactory={realtimeFactory} resource={resource} surfaceComponent={TestSurface} />);
     const title = view.container.querySelector<HTMLInputElement>("[aria-label='ページタイトル']");
     if (!title) throw new Error("Title input was not rendered");
+    title.focus();
     setInputValue(title, "ローカルのタイトル");
 
     await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
@@ -97,6 +98,12 @@ describe("KnowledgeEditor", () => {
     expect(view.container.querySelector("[role='dialog']")?.textContent).toContain("別の編集が先に保存されました");
     expect(view.container.textContent).toContain("rev. 4");
     expect(getPage).toHaveBeenCalledWith(resource.page.id);
+    const loadLatest = [...view.container.querySelectorAll<HTMLButtonElement>("[role='dialog'] button")]
+      .find((button) => button.textContent === "最新版を読み込む");
+    expect(document.activeElement).toBe(loadLatest);
+    act(() => { loadLatest?.click(); });
+    expect(view.container.querySelector("[role='dialog']")).toBeNull();
+    expect(document.activeElement).toBe(title);
   });
 
   it("reports move and trash results so the shell can refresh navigation", async () => {
