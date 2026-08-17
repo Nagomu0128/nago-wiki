@@ -30,6 +30,9 @@ export async function indexPage(
     .first<IndexablePageRow>();
 
   if (page?.status !== "active") {
+    await dependencies.search.items.delete(
+      `w/${job.workspaceId}/p/${job.pageId}.md`,
+    );
     await markDeleted(dependencies.database, job.pageId);
     return "deleted";
   }
@@ -87,8 +90,14 @@ async function markDeleted(database: D1Database, pageId: string): Promise<void> 
   await database
     .prepare(
       `UPDATE index_state
-          SET status = 'deleted', last_error = NULL, updated_at = ?2
-        WHERE page_id = ?1`,
+          SET indexed_hash = NULL, status = 'deleted', last_error = NULL,
+              updated_at = ?2
+        WHERE page_id = ?1
+          AND EXISTS (
+            SELECT 1 FROM pages
+             WHERE pages.id = index_state.page_id
+               AND pages.status = 'trashed'
+          )`,
     )
     .bind(pageId, new Date().toISOString())
     .run();

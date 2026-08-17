@@ -22,7 +22,12 @@ export async function reconcilePendingJobs(environment: McpRuntimeEnv): Promise<
       `SELECT state.page_id, pages.workspace_id, state.desired_hash
          FROM index_state AS state
          JOIN pages ON pages.id = state.page_id
-        WHERE state.status IN ('pending', 'failed') AND pages.status = 'active'
+        WHERE (
+          state.status IN ('pending', 'failed') AND pages.status = 'active'
+        ) OR (
+          state.status = 'deleted' AND state.indexed_hash IS NOT NULL
+            AND pages.status = 'trashed'
+        )
         ORDER BY state.updated_at ASC LIMIT 50`,
     ).all<PendingIndexRow>(),
   ]);
