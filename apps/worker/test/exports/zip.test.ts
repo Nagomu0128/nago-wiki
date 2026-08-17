@@ -59,24 +59,39 @@ describe("stored ZIP writer", () => {
     ).toThrow("ZIP entry size changed");
   });
 
-  it("adds ZIP64 end records when local offsets exceed ZIP32", () => {
+  it("uses ZIP64 at the exact ZIP32 sentinel boundary", () => {
+    const firstName = "pad";
+    const firstSize = 0xffff_ffff - (30 + firstName.length + 16);
     const plan = planStoredZip([
-      { name: "large.bin", size: 0xffff_ffff },
+      { name: firstName, size: firstSize },
       { name: "manifest.json", size: 2 },
     ]);
     const central = buildCentralDirectory(
       plan,
       new Map([
-        ["large.bin", 0],
+        [firstName, 0],
         ["manifest.json", 0],
       ]),
     );
     const view = new DataView(central.buffer);
+    const secondCentralOffset = 46 + firstName.length;
 
     expect(plan.centralOffset).toBeGreaterThan(0xffff_ffff);
+    expect(entryAt(plan.entries, 1).localOffset).toBe(0xffff_ffff);
+    expect(view.getUint16(secondCentralOffset + 6, true)).toBe(45);
+    expect(view.getUint32(secondCentralOffset + 42, true)).toBe(0xffff_ffff);
+    expect(
+      view.getUint16(secondCentralOffset + 46 + "manifest.json".length, true),
+    ).toBe(0x0001);
     expect(central.byteLength).toBe(plan.centralSize + 76 + 22);
     expect(view.getUint32(plan.centralSize, true)).toBe(0x06064b50);
     expect(view.getUint32(central.byteLength - 22, true)).toBe(0x06054b50);
+  });
+
+  it("rejects the ZIP32 size sentinel until per-entry ZIP64 sizes are supported", () => {
+    expect(() =>
+      planStoredZip([{ name: "unsupported.bin", size: 0xffff_ffff }]),
+    ).toThrow("ZIP entry size is not supported");
   });
 });
 
