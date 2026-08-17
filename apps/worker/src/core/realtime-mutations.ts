@@ -16,7 +16,10 @@ import {
 import { D1WikiRepository } from "./repository";
 import { pageRoomKey } from "../realtime/types";
 
-type RealtimeMutationEnv = Pick<Env, "DB" | "FILES" | "PAGE_ROOM">;
+export type RealtimeMutationEnv = Pick<
+  Env,
+  "ASYNC_JOBS" | "DB" | "FILES" | "PAGE_ROOM"
+>;
 
 export class RealtimePageMutationService implements PageMutationService {
   private readonly versions: R2VersionBodyStore;
@@ -33,11 +36,69 @@ export class RealtimePageMutationService implements PageMutationService {
     page: Page,
     request: UpdatePageRequest,
   ): Promise<Page> {
+    if (request.bodyMd === undefined && request.title !== undefined) {
+      return this.updateTitle(identity, page, request.title, request.baseRevision);
+    }
     return this.replace(identity, page, request.bodyMd ?? page.bodyMd, {
       reason: "edit",
       ...(request.title === undefined ? {} : { title: request.title }),
       expectedBaseRevision: request.baseRevision,
     });
+  }
+
+  private async updateTitle(
+    identity: AuthenticatedIdentity,
+    page: Page,
+    title: string,
+    expectedBaseRevision: number,
+  ): Promise<Page> {
+    const room = this.environment.PAGE_ROOM.getByName(
+      pageRoomKey(identity.workspaceId, page.id),
+    );
+    const status = await room.flushNow();
+    if (
+      status.dirty ||
+      (status.baseRevision !== expectedBaseRevision &&
+        status.baseRevision !== expectedBaseRevision + 1)
+    ) {
+      throw revisionConflict(status.baseRevision);
+    }
+    const now = new Date().toISOString();
+    const results = await this.environment.DB.batch([
+      this.environment.DB.prepare(
+        `UPDATE pages SET title = ?2, updated_at = ?3
+          WHERE id = ?1 AND workspace_id = ?4 AND revision = ?5
+            AND status = 'active'`,
+      ).bind(page.id, title, now, identity.workspaceId, status.baseRevision),
+      this.environment.DB.prepare(
+        `INSERT INTO index_state
+           (page_id, desired_hash, indexed_hash, status, last_error, updated_at)
+         SELECT id, content_hash, NULL, 'pending', NULL, ?2
+           FROM pages WHERE id = ?1 AND revision = ?3
+         ON CONFLICT(page_id) DO UPDATE SET
+           desired_hash = excluded.desired_hash,
+           status = 'pending', last_error = NULL, updated_at = excluded.updated_at`,
+      ).bind(page.id, now, status.baseRevision),
+    ]);
+    if (results[0]?.meta.changes !== 1) {
+      throw revisionConflict(status.baseRevision);
+    }
+    const result = await this.repository.getPage(page.id);
+    if (result === null) throw new ApiProblem("PAGE_NOT_FOUND", 404, "Page was not found");
+    try {
+      await this.environment.ASYNC_JOBS.send({
+        type: "index-page",
+        jobId: crypto.randomUUID(),
+        workspaceId: identity.workspaceId,
+        pageId: page.id,
+        desiredHash: result.contentHash,
+      });
+    } catch (error) {
+      // index_state remains pending, so the scheduled reconciler can recover
+      // without turning a committed title update into a misleading API error.
+      console.error("Could not enqueue title reindex", error);
+    }
+    return result;
   }
 
   public async restoreVersion(

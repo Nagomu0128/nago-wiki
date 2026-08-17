@@ -79,6 +79,43 @@ describe("KnowledgeEditor", () => {
     expect(view.container.querySelector("[aria-label='Markdownソース']")).toBeNull();
   });
 
+  it("keeps editing locked until the first realtime synchronization", async () => {
+    const connectingFactory: RealtimeProviderFactory = {
+      connect({ document, permission }) {
+        return {
+          document,
+          status: "connecting",
+          permission,
+          subscribeStatus(listener) {
+            listener("connecting");
+            return () => undefined;
+          },
+          subscribePermission(listener) {
+            listener(permission);
+            return () => undefined;
+          },
+          destroy() {
+            document.destroy();
+          },
+        };
+      },
+    };
+    view = await renderView(
+      <KnowledgeEditor
+        api={apiWithUpdate(vi.fn(() => Promise.resolve(resource)))}
+        realtimeFactory={connectingFactory}
+        resource={resource}
+        surfaceComponent={TestSurface}
+      />,
+    );
+
+    expect(
+      view.container.querySelector<HTMLInputElement>("[aria-label='ページタイトル']")
+        ?.disabled,
+    ).toBe(true);
+    expect(view.container.textContent).toContain("接続後に編集できます");
+  });
+
   it("keeps local content and opens conflict resolution on a stale baseRevision", async () => {
     vi.useFakeTimers();
     const latest: PageResource = { ...resource, page: { ...resource.page, revision: 4, bodyMd: "# サーバー版" } };

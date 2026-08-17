@@ -182,7 +182,10 @@ export function KnowledgeEditor({
   const conflictDialogRef = useRef<HTMLDivElement>(null);
   const editGenerationRef = useRef(0);
   const suggestions = useMemo(() => suggestionProvider ?? createApiWikiLinkSuggestionProvider(api), [api, suggestionProvider]);
-  const readOnly = permission === "viewer";
+  // Offline editing is intentionally outside v1. Keeping the surface locked
+  // until the first Yjs sync prevents an independently seeded document from
+  // merging duplicate Markdown into the canonical PageRoom document.
+  const readOnly = permission === "viewer" || realtimeStatus !== "connected";
 
   useEffect(() => () => { document.destroy(); }, [document]);
 
@@ -264,7 +267,6 @@ export function KnowledgeEditor({
       const updated = await api.updatePage(resource.page.id, {
         baseRevision,
         title,
-        ...(realtimeStatus === "connected" ? {} : { bodyMd: markdown }),
       });
       setRevision(updated.page.revision);
       setConflict(null);
@@ -288,7 +290,7 @@ export function KnowledgeEditor({
         setSaveStatus("error");
       }
     }
-  }, [api, markdown, onSaved, readOnly, realtimeStatus, resource.page.id, revision, title]);
+  }, [api, onSaved, readOnly, resource.page.id, revision, title]);
 
   useEffect(() => {
     if (saveStatus !== "dirty") return;
@@ -427,7 +429,12 @@ export function KnowledgeEditor({
 
       {normalizationWarning && <div className="inline-warning" role="status">Markdownを正規化しました。保存前に差分を確認してください。</div>}
       {saveError && <div className="inline-warning is-error" role="alert">{saveError.message}<button onClick={() => { void save(); }} type="button">再試行</button></div>}
-      {readOnly && <div className="inline-warning" role="status">このページは閲覧専用です。</div>}
+      {permission === "viewer" && <div className="inline-warning" role="status">このページは閲覧専用です。</div>}
+      {permission !== "viewer" && realtimeStatus !== "connected" && (
+        <div className="inline-warning" role="status">
+          リアルタイム同期を確立しています。接続後に編集できます。
+        </div>
+      )}
 
       <div className="editor-canvas">
         <div hidden={mode !== "visual"}>
