@@ -102,4 +102,68 @@ describe("RealtimePageMutationService", () => {
       }),
     );
   });
+
+  it("freezes every subtree room before trash and can thaw them", async () => {
+    const freezeAndFlush = vi.fn(() => Promise.resolve({
+      baseRevision: 1,
+      dirty: false,
+      nextFlushAt: null,
+    }));
+    const thaw = vi.fn(() => Promise.resolve());
+    const confirmTrash = vi.fn(() => Promise.resolve());
+    const getByName = vi.fn(() => ({ confirmTrash, freezeAndFlush, thaw }));
+    const environment = {
+      DB: env.DB,
+      FILES: env.FILES,
+      ASYNC_JOBS: { send: vi.fn(() => Promise.resolve()) },
+      PAGE_ROOM: { getByName },
+    } as unknown as RealtimeMutationEnv;
+    const service = new RealtimePageMutationService(
+      environment,
+      new D1WikiRepository(env.DB),
+    );
+    const childPageId = "00000000-0000-7000-8000-000000000103";
+
+    await service.freezePagesForTrash(identity, [pageId, childPageId]);
+    await service.discardPagesAfterTrash(identity, [pageId, childPageId]);
+    await service.thawPages(identity, [pageId, childPageId]);
+
+    expect(freezeAndFlush).toHaveBeenCalledTimes(2);
+    expect(confirmTrash).toHaveBeenCalledTimes(2);
+    expect(thaw).toHaveBeenCalledTimes(2);
+    expect(getByName).toHaveBeenCalledWith(
+      `${DEFAULT_WORKSPACE_ID}:${pageId}`,
+    );
+    expect(getByName).toHaveBeenCalledWith(
+      `${DEFAULT_WORKSPACE_ID}:${childPageId}`,
+    );
+  });
+
+  it("aborts trash and thaws the room when realtime edits cannot flush", async () => {
+    const thaw = vi.fn(() => Promise.resolve());
+    const environment = {
+      DB: env.DB,
+      FILES: env.FILES,
+      ASYNC_JOBS: { send: vi.fn(() => Promise.resolve()) },
+      PAGE_ROOM: {
+        getByName: () => ({
+          freezeAndFlush: () => Promise.resolve({
+            baseRevision: 1,
+            dirty: true,
+            nextFlushAt: Date.now() + 1_000,
+          }),
+          thaw,
+        }),
+      },
+    } as unknown as RealtimeMutationEnv;
+    const service = new RealtimePageMutationService(
+      environment,
+      new D1WikiRepository(env.DB),
+    );
+
+    await expect(
+      service.freezePagesForTrash(identity, [pageId]),
+    ).rejects.toMatchObject({ code: "REALTIME_FLUSH_FAILED", status: 503 });
+    expect(thaw).toHaveBeenCalledOnce();
+  });
 });

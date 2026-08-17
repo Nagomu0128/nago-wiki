@@ -15,6 +15,7 @@ interface RoomMetaRow extends Record<string, SqlStorageValue> {
   next_flush_at: number | null;
   retry_count: number;
   initialized: number;
+  frozen: number;
   last_author_id: string | null;
   last_reason: string;
 }
@@ -40,6 +41,7 @@ export interface RoomMeta {
   nextFlushAt: number | null;
   retryCount: number;
   initialized: boolean;
+  frozen: boolean;
   lastAuthorId: string | null;
   lastReason: "edit" | "restore" | "import" | "manual";
 }
@@ -136,6 +138,7 @@ export class PageRoomStorage {
         retry_count INTEGER NOT NULL DEFAULT 0,
         last_activity_at INTEGER NOT NULL DEFAULT 0,
         initialized INTEGER NOT NULL DEFAULT 0
+        ,frozen INTEGER NOT NULL DEFAULT 0
         ,last_author_id TEXT,
         last_reason TEXT NOT NULL DEFAULT 'edit'
       );
@@ -154,6 +157,14 @@ export class PageRoomStorage {
         ON y_updates(snapshot_sequence, sequence);
       INSERT OR IGNORE INTO room_meta(id) VALUES (1);
     `);
+    const columns = this.sql
+      .exec<{ name: string }>("PRAGMA table_info(room_meta)")
+      .toArray();
+    if (!columns.some((column) => column.name === "frozen")) {
+      this.sql.exec(
+        "ALTER TABLE room_meta ADD COLUMN frozen INTEGER NOT NULL DEFAULT 0",
+      );
+    }
   }
 
   public restoreInto(doc: Y.Doc): void {
@@ -191,9 +202,35 @@ export class PageRoomStorage {
       nextFlushAt: row.next_flush_at,
       retryCount: row.retry_count,
       initialized: row.initialized === 1,
+      frozen: row.frozen === 1,
       lastAuthorId: row.last_author_id,
       lastReason: normalizeReason(row.last_reason),
     };
+  }
+
+  public setFrozen(frozen: boolean, now: number): void {
+    this.sql.exec(
+      "UPDATE room_meta SET frozen = ?, last_activity_at = ? WHERE id = 1",
+      frozen ? 1 : 0,
+      now,
+    );
+  }
+
+  public resetForReload(now: number): void {
+    this.storage.transactionSync(() => {
+      this.sql.exec("DELETE FROM y_updates");
+      this.sql.exec("DELETE FROM y_snapshots");
+      this.sql.exec(
+        `UPDATE room_meta
+            SET base_revision = 0, snapshot_sequence = 0, dirty = 0,
+                first_dirty_at = NULL, last_update_at = NULL,
+                next_flush_at = NULL, retry_count = 0,
+                last_activity_at = ?, initialized = 0, frozen = 1,
+                last_author_id = NULL, last_reason = 'edit'
+          WHERE id = 1`,
+        now,
+      );
+    });
   }
 
   public ensureIdentity(workspaceId: string, pageId: string): boolean {

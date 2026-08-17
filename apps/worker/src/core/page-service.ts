@@ -33,6 +33,18 @@ export interface PageMutationService {
     versionId: string,
     request: RestoreVersionRequest,
   ): Promise<Page>;
+  freezePagesForTrash?(
+    identity: AuthenticatedIdentity,
+    pageIds: string[],
+  ): Promise<void>;
+  discardPagesAfterTrash?(
+    identity: AuthenticatedIdentity,
+    pageIds: string[],
+  ): Promise<void>;
+  thawPages?(
+    identity: AuthenticatedIdentity,
+    pageIds: string[],
+  ): Promise<void>;
 }
 
 export interface WikiCoreService {
@@ -382,9 +394,17 @@ export class D1WikiCoreService implements WikiCoreService {
     pageId: string,
   ): Promise<string[]> {
     await this.requirePage(identity, pageId, true, false);
-    const pageIds = await this.repository.trashSubtree(pageId);
-    if (pageIds.length === 0) throw pageNotFound();
-    return pageIds;
+    const expectedPageIds = await this.repository.listActiveSubtreePageIds(pageId);
+    await this.mutations.freezePagesForTrash?.(identity, expectedPageIds);
+    try {
+      const pageIds = await this.repository.trashSubtree(pageId);
+      if (pageIds.length === 0) throw pageNotFound();
+      await this.mutations.discardPagesAfterTrash?.(identity, pageIds);
+      return pageIds;
+    } catch (error) {
+      await this.mutations.thawPages?.(identity, expectedPageIds);
+      throw error;
+    }
   }
 
   public async restorePage(
@@ -405,6 +425,7 @@ export class D1WikiCoreService implements WikiCoreService {
     }
     const restoredIds = await this.repository.restoreSubtree(pageId);
     if (restoredIds.length === 0) throw pageNotFound();
+    await this.mutations.thawPages?.(identity, restoredIds);
     const restored = await this.repository.getPage(pageId);
     if (restored === null) throw pageNotFound();
     return this.toPageResponse(identity, restored);

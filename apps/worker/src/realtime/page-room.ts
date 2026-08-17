@@ -81,7 +81,7 @@ export interface PageRoomPersistenceStatus {
 }
 
 export class PageRoom extends DurableObject<PageRoomEnv> {
-  private readonly document = new Y.Doc();
+  private document = new Y.Doc();
   private readonly roomStorage: PageRoomStorage;
   private readonly currentBody: CurrentBodyAdapter;
 
@@ -130,6 +130,9 @@ export class PageRoom extends DurableObject<PageRoomEnv> {
     ) {
       return new Response("Not Found", { status: 404 });
     }
+    if (this.roomStorage.getMeta().frozen) {
+      return new Response("Not Found", { status: 404 });
+    }
 
     const initialized = await this.ensureInitialized(
       authorization.workspaceId,
@@ -174,6 +177,15 @@ export class PageRoom extends DurableObject<PageRoomEnv> {
         message: "The realtime session has expired",
       });
       webSocket.close(CLOSE_UNAUTHORIZED, "Session expired");
+      return;
+    }
+    if (this.roomStorage.getMeta().frozen) {
+      sendControl(webSocket, {
+        type: "error",
+        code: "FORBIDDEN",
+        message: "This page is no longer available",
+      });
+      webSocket.close(CLOSE_FORBIDDEN, "Page unavailable");
       return;
     }
     if (typeof message === "string") {
@@ -319,6 +331,7 @@ export class PageRoom extends DurableObject<PageRoomEnv> {
     }
     const meta = this.roomStorage.getMeta();
     if (
+      meta.frozen ||
       meta.dirty ||
       meta.baseRevision !== input.expectedBaseRevision
     ) {
@@ -359,6 +372,41 @@ export class PageRoom extends DurableObject<PageRoomEnv> {
     await this.flushCurrentBody(Date.now());
     await this.scheduleNextAlarm();
     return this.getPersistenceStatus();
+  }
+
+  public async freezeAndFlush(): Promise<PageRoomPersistenceStatus> {
+    this.roomStorage.setFrozen(true, Date.now());
+    for (const webSocket of this.ctx.getWebSockets()) {
+      sendControl(webSocket, {
+        type: "error",
+        code: "FORBIDDEN",
+        message: "This page is being moved to trash",
+      });
+      webSocket.close(CLOSE_FORBIDDEN, "Page moved to trash");
+    }
+    await this.flushCurrentBody(Date.now());
+    await this.scheduleNextAlarm();
+    return this.getPersistenceStatus();
+  }
+
+  public async confirmTrash(): Promise<void> {
+    this.roomStorage.setFrozen(true, Date.now());
+    for (const webSocket of this.ctx.getWebSockets()) {
+      sendControl(webSocket, {
+        type: "error",
+        code: "FORBIDDEN",
+        message: "This page was moved to trash",
+      });
+      webSocket.close(CLOSE_FORBIDDEN, "Page moved to trash");
+    }
+    this.roomStorage.resetForReload(Date.now());
+    this.document.destroy();
+    this.document = new Y.Doc();
+    await this.scheduleNextAlarm();
+  }
+
+  public thaw(): void {
+    this.roomStorage.setFrozen(false, Date.now());
   }
 
   public getPersistenceStatus(): PageRoomPersistenceStatus {

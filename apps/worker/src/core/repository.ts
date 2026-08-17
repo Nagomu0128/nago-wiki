@@ -296,7 +296,13 @@ export class D1WikiRepository {
              (id, workspace_id, parent_id, slug, title, body_md, revision,
               content_hash, access_mode, status, created_by, created_at,
               updated_at, trashed_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, NULL)`,
+           SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'active',
+                  ?10, ?11, ?12, NULL
+            WHERE ?3 IS NULL OR EXISTS (
+              SELECT 1 FROM pages AS parent
+               WHERE parent.id = ?3 AND parent.workspace_id = ?2
+                 AND parent.status = 'active'
+            )`,
         )
         .bind(
           page.id,
@@ -361,6 +367,16 @@ export class D1WikiRepository {
     try {
       await this.database.batch(statements);
     } catch (error) {
+      if (page.parentId !== null) {
+        const activeParent = await this.database
+          .prepare(
+            `SELECT id FROM pages
+              WHERE id = ?1 AND workspace_id = ?2 AND status = 'active'`,
+          )
+          .bind(page.parentId, page.workspaceId)
+          .first<IdRow>();
+        if (activeParent === null) throw pageNotFound();
+      }
       if (isD1UniqueConstraintError(error)) {
         if (
           error instanceof Error &&
@@ -746,6 +762,23 @@ export class D1WikiRepository {
         .bind(pageId, trashBatchId, trashBatchId, now),
     ]);
     return (results[0]?.results ?? []).map((row) => row.id);
+  }
+
+  public async listActiveSubtreePageIds(pageId: string): Promise<string[]> {
+    const result = await this.database
+      .prepare(
+        `WITH RECURSIVE subtree(id) AS (
+           SELECT id FROM pages WHERE id = ?1 AND status = 'active'
+           UNION ALL
+           SELECT child.id FROM pages AS child
+           JOIN subtree ON child.parent_id = subtree.id
+           WHERE child.status = 'active'
+         )
+         SELECT id FROM subtree ORDER BY id`,
+      )
+      .bind(pageId)
+      .all<IdRow>();
+    return result.results.map((row) => row.id);
   }
 
   public async restoreSubtree(pageId: string): Promise<string[]> {

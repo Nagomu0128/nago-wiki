@@ -132,6 +132,60 @@ export class RealtimePageMutationService implements PageMutationService {
     });
   }
 
+  public async freezePagesForTrash(
+    identity: AuthenticatedIdentity,
+    pageIds: string[],
+  ): Promise<void> {
+    const frozen: string[] = [];
+    try {
+      for (const pageId of pageIds) {
+        const room = this.environment.PAGE_ROOM.getByName(
+          pageRoomKey(identity.workspaceId, pageId),
+        );
+        const status = await room.freezeAndFlush();
+        frozen.push(pageId);
+        if (status.dirty) {
+          throw new ApiProblem(
+            "REALTIME_FLUSH_FAILED",
+            503,
+            "Realtime edits could not be saved before moving the page to trash",
+          );
+        }
+      }
+    } catch (error) {
+      await this.thawPages(identity, frozen);
+      throw error;
+    }
+  }
+
+  public async discardPagesAfterTrash(
+    identity: AuthenticatedIdentity,
+    pageIds: string[],
+  ): Promise<void> {
+    await Promise.all(
+      pageIds.map(async (pageId) => {
+        const room = this.environment.PAGE_ROOM.getByName(
+          pageRoomKey(identity.workspaceId, pageId),
+        );
+        await room.confirmTrash();
+      }),
+    );
+  }
+
+  public async thawPages(
+    identity: AuthenticatedIdentity,
+    pageIds: string[],
+  ): Promise<void> {
+    await Promise.all(
+      pageIds.map(async (pageId) => {
+        const room = this.environment.PAGE_ROOM.getByName(
+          pageRoomKey(identity.workspaceId, pageId),
+        );
+        await room.thaw();
+      }),
+    );
+  }
+
   private async replace(
     identity: AuthenticatedIdentity,
     page: Page,

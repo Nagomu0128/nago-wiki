@@ -1,10 +1,11 @@
 import type { AuthenticatedIdentity } from "@nago-wiki/shared";
 import { env } from "cloudflare:workers";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createUuidV7 } from "../src/core/ids";
 import {
   D1PageMutationService,
   D1WikiCoreService,
+  type PageMutationService,
   type VersionBodyStore,
 } from "../src/core/page-service";
 import {
@@ -163,6 +164,50 @@ describe("D1 wiki core", () => {
 
     await service.restorePage(editor, parent.page.id);
     expect((await service.getPage(editor, child.page.id)).page.status).toBe("active");
+  });
+
+  it("freezes realtime rooms before trash and thaws them after restore", async () => {
+    const store = new MemoryVersionBodyStore();
+    const direct = new D1PageMutationService(repository, store);
+    const freezePagesForTrash = vi.fn(() => Promise.resolve());
+    const discardPagesAfterTrash = vi.fn(() => Promise.resolve());
+    const thawPages = vi.fn(() => Promise.resolve());
+    const lifecycle: PageMutationService = {
+      updatePage: direct.updatePage.bind(direct),
+      restoreVersion: direct.restoreVersion.bind(direct),
+      freezePagesForTrash,
+      discardPagesAfterTrash,
+      thawPages,
+    };
+    const coordinated = new D1WikiCoreService(repository, lifecycle, direct);
+    const parent = await coordinated.createPage(editor, {
+      parentId: null,
+      title: "Coordinated parent",
+      bodyMd: "parent",
+      accessMode: "workspace",
+    });
+    const child = await coordinated.createPage(editor, {
+      parentId: parent.page.id,
+      title: "Coordinated child",
+      bodyMd: "child",
+      accessMode: "workspace",
+    });
+
+    await coordinated.trashPage(editor, parent.page.id);
+    expect(freezePagesForTrash).toHaveBeenCalledWith(
+      editor,
+      expect.arrayContaining([parent.page.id, child.page.id]),
+    );
+    expect(discardPagesAfterTrash).toHaveBeenCalledWith(
+      editor,
+      expect.arrayContaining([parent.page.id, child.page.id]),
+    );
+
+    await coordinated.restorePage(editor, parent.page.id);
+    expect(thawPages).toHaveBeenCalledWith(
+      editor,
+      expect.arrayContaining([parent.page.id, child.page.id]),
+    );
   });
 
   it("does not restore a child trashed by an earlier operation", async () => {
