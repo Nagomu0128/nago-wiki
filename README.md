@@ -19,3 +19,7 @@ npm run dev
 ```
 
 Cloudflare resource IDやOAuth secretはrepositoryへ保存しません。local secretは`.dev.vars`、production secretはWrangler SecretsまたはSecrets Storeを使用します。
+
+## Provisioning
+
+Cloudflare account-level resources are managed under [`infra/terraform`](./infra/terraform). The Worker, Durable Objects, Workflows, Queue consumer, and Discord Container are deployed from [`apps/worker/wrangler.jsonc`](./apps/worker/wrangler.jsonc). See the infrastructure README for the provisioning order and required secrets.

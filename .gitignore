@@ -12,3 +12,8 @@ coverage/
 Thumbs.db
 apps/web/.vite/
 apps/discord-bot/data/
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log

@@ -1,0 +1,3 @@
+cloudflare_account_id = "replace-with-your-account-id"
+environment           = "dev"
+d1_primary_location   = "apac"
