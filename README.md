@@ -18,6 +18,10 @@ npm run check
 npm run dev
 ```
 
+`npm run dev` starts the API Worker and Vite together; the Vite proxy forwards
+both HTTP API calls and realtime WebSocket upgrades. Production uses
+`npm run deploy:production` to build and upload the Web SPA with the Worker.
+
 Cloudflare resource IDやOAuth secretはrepositoryへ保存しません。local secretは`.dev.vars`、production secretはWrangler SecretsまたはSecrets Storeを使用します。
 
 ## Provisioning

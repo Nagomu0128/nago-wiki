@@ -13,6 +13,7 @@
   "scripts": {
     "build": "npm run build --workspaces --if-present",
     "check": "npm run lint && npm run typecheck && npm run test && npm run build",
+    "deploy:production": "npm run build -w @nago-wiki/web && wrangler deploy --config apps/worker/wrangler.jsonc --env production",
     "dev": "concurrently -n worker,web -c cyan,magenta \"npm run dev -w @nago-wiki/worker\" \"npm run dev -w @nago-wiki/web\"",
     "lint": "eslint . --max-warnings=0",
     "test": "npm run test --workspaces --if-present",

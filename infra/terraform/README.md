@@ -27,7 +27,11 @@ Use a random 32-byte-or-longer value for `TOKEN_ENCRYPTION_KEY`, `REALTIME_INTER
 
 ```powershell
 npx wrangler d1 migrations apply nago-wiki-prod --remote --env production --config apps/worker/wrangler.jsonc
-npx wrangler deploy --env production --config apps/worker/wrangler.jsonc
+npm run deploy:production
 ```
+
+The production deploy command builds the React SPA first, then uploads it with
+the Worker as Cloudflare Static Assets. API, realtime, OAuth, and MCP paths run
+the Worker first; all other navigation paths use the SPA fallback.
 
 The AI Search public search, chat-completions, and built-in MCP endpoints are disabled. Access is only through the Worker, where current D1 ACL and content hashes are rechecked.
