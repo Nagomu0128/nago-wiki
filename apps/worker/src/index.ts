@@ -17,6 +17,7 @@ import { createRealtimeWikiCoreService } from "./core/realtime-mutations";
 import { D1WikiRepository } from "./core/repository";
 import { consumeAsyncJobs } from "./jobs/consumer";
 import { reconcilePendingJobs } from "./jobs/reconcile";
+import { createExportRoutes } from "./exports/routes";
 import { createImportRoutes } from "./imports/routes";
 import { cleanupExpiredImports } from "./imports/cleanup";
 import { createMcpOAuthProvider } from "./mcp/oauth";
@@ -30,6 +31,7 @@ import { createPagesRoutes } from "./routes/pages";
 import { createSessionRoutes } from "./routes/session";
 
 export { DiscordGatewayContainer, PageRoom };
+export { ExportWorkflow } from "./exports/workflow";
 export { ImportWorkflow } from "./imports/workflow";
 
 const app = new Hono<CoreHonoEnv>();
@@ -84,6 +86,7 @@ app.route("/api/v1", createOrganizationRoutes());
 app.route("/api/v1", createAssetRoutes());
 app.route("/api/v1", createAiRoutes());
 app.route("/api/v1", createImportRoutes());
+app.route("/api/v1", createExportRoutes());
 app.route("/api/v1", createBotRoutes());
 
 app.get("/api/v1/health", (context) =>

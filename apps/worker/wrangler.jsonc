@@ -205,6 +205,11 @@
       "name": "nago-wiki-import-dev",
       "binding": "IMPORT_WORKFLOW",
       "class_name": "ImportWorkflow"
+    },
+    {
+      "name": "nago-wiki-export-dev",
+      "binding": "EXPORT_WORKFLOW",
+      "class_name": "ExportWorkflow"
     }
   ],
   "triggers": {
