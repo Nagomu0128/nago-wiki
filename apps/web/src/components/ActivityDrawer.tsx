@@ -42,12 +42,13 @@ export function ActivityDrawer({ api, mode, pageId, baseRevision, onRestored }: 
       <div className="drawer-section-title"><span>{mode === "comments" ? "Conversation" : "Page history"}</span><h2>{mode === "comments" ? "コメント" : "変更履歴"}</h2></div>
       {mode === "comments" ? (
         <>
-          <form className="comment-composer" onSubmit={(event) => { event.preventDefault(); void submitComment(); }}>
+          <form className="comment-composer" onSubmit={(event) => { event.preventDefault(); void submitComment().catch(() => undefined); }}>
             <textarea aria-label="コメント" onChange={(event) => { setCommentBody(event.target.value); }} placeholder="コメントを追加。@名前 でメンション…" rows={3} value={commentBody} />
             <div><small>Markdownを使用できます</small><button disabled={!commentBody.trim() || createComment.status === "loading"} type="submit">送信</button></div>
           </form>
           {comments.status === "loading" && <div className="drawer-loading" role="status"><i /><span>コメントを読み込み中…</span></div>}
           {comments.status === "error" && <div className="drawer-error" role="alert">{comments.error.message}</div>}
+          {createComment.status === "error" && <div className="drawer-error" role="alert">{createComment.error.message}</div>}
           <div className="comment-list">
             {comments.data?.map((comment) => (
               <article key={comment.id}>
@@ -62,6 +63,7 @@ export function ActivityDrawer({ api, mode, pageId, baseRevision, onRestored }: 
         <>
           {versions.status === "loading" && <div className="drawer-loading" role="status"><i /><span>履歴を読み込み中…</span></div>}
           {versions.status === "error" && <div className="drawer-error" role="alert">{versions.error.message}</div>}
+          {restoreVersion.status === "error" && <div className="drawer-error" role="alert">{restoreVersion.error.message}</div>}
           <ol className="version-list">
             {versions.data?.map((version, index) => (
               <li key={version.id}>
@@ -75,7 +77,7 @@ export function ActivityDrawer({ api, mode, pageId, baseRevision, onRestored }: 
             <div className="restore-confirm" role="alertdialog" aria-label="過去版を復元">
               <strong>この版を新しいrevisionとして復元しますか？</strong>
               <p>現在の内容は履歴に残り、失われません。</p>
-              <div><button onClick={() => { setRestoreCandidate(null); }} type="button">キャンセル</button><button disabled={restoreVersion.status === "loading"} onClick={() => { void restore(restoreCandidate); }} type="button">復元する</button></div>
+              <div><button onClick={() => { setRestoreCandidate(null); }} type="button">キャンセル</button><button disabled={restoreVersion.status === "loading"} onClick={() => { void restore(restoreCandidate).catch(() => undefined); }} type="button">復元する</button></div>
             </div>
           )}
         </>

@@ -282,7 +282,7 @@ export class FixtureWikiApi implements WikiApi {
         source: item.title.toLocaleLowerCase("ja").includes(query) ? "title" as const : "semantic" as const,
         contentHash: item.contentHash,
       }));
-    return { hits };
+    return { hits, cursor: null };
   }
 
   async answer(query: string, _knowledgeMode: "wiki_only" | "wiki_plus_general", signal?: AbortSignal): Promise<AnswerResponse> {

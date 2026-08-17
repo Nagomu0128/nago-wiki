@@ -156,7 +156,7 @@ export class NativeYjsRealtimeSession implements RealtimeSession {
       const syncType = readVarUint(bytes, cursor);
       const payload = readBytes(bytes, cursor);
       if (syncType === 0) {
-        this.send(encodeSyncMessage(1, Y.encodeStateAsUpdate(this.document, payload)));
+        if (this.currentPermission !== "viewer") this.send(encodeSyncMessage(1, Y.encodeStateAsUpdate(this.document, payload)));
       } else if (syncType === 1 || syncType === 2) {
         Y.applyUpdate(this.document, payload, remoteOrigin);
       }

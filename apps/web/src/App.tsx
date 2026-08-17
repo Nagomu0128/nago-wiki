@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ApiFailure, createWikiApi, useApiQuery, type PageTreeNode, type WikiApi } from "./api";
+import { ApiFailure, createWikiApi, useApiQuery, type PageResource, type PageTreeNode, type WikiApi } from "./api";
 import { ActivityDrawer, ImportDrawer, SearchDrawer } from "./components";
 import { KnowledgeEditor } from "./editor";
 import { NativeYjsRealtimeProviderFactory, type RealtimeProviderFactory } from "./realtime";
@@ -94,11 +94,14 @@ function PageTree({ nodes, activeId, onSelect }: TreeProps) {
 
 export function App({ api = defaultApi, realtimeFactory = defaultRealtimeFactory }: AppProps) {
   const [selectedPageId, setSelectedPageId] = useState<string | null>(null);
+  const [pageOverride, setPageOverride] = useState<PageResource | null>(null);
+  const [pageActionError, setPageActionError] = useState<Error | null>(null);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(true);
   const [drawerMode, setDrawerMode] = useState<DrawerMode>("search");
   const me = useApiQuery((signal) => api.getMe(signal), [api]);
   const tree = useApiQuery((signal) => api.getTree(signal), [api]);
+  const refetchTree = tree.refetch;
   const effectiveSelectedPageId = selectedPageId ?? tree.data?.[0]?.id ?? null;
   const page = useApiQuery(
     (signal) => effectiveSelectedPageId
@@ -107,6 +110,8 @@ export function App({ api = defaultApi, realtimeFactory = defaultRealtimeFactory
     [api, effectiveSelectedPageId],
     Boolean(effectiveSelectedPageId),
   );
+  const queriedPage = page.data?.page.id === effectiveSelectedPageId ? page.data : undefined;
+  const visiblePage = pageOverride?.page.id === effectiveSelectedPageId ? pageOverride : queriedPage;
 
   useEffect(() => {
     const handleShortcut = (event: KeyboardEvent) => {
@@ -128,16 +133,28 @@ export function App({ api = defaultApi, realtimeFactory = defaultRealtimeFactory
   }, []);
 
   const createPage = useCallback(async () => {
-    const resource = await api.createPage({ title: "無題のページ", parentId: effectiveSelectedPageId });
-    tree.refetch();
-    setSelectedPageId(resource.page.id);
-    setMobileSidebarOpen(false);
-  }, [api, effectiveSelectedPageId, tree]);
+    setPageActionError(null);
+    try {
+      const resource = await api.createPage({ title: "無題のページ", parentId: effectiveSelectedPageId });
+      refetchTree();
+      setSelectedPageId(resource.page.id);
+      setMobileSidebarOpen(false);
+    } catch (error) {
+      setPageActionError(error instanceof Error ? error : new Error(String(error)));
+    }
+  }, [api, effectiveSelectedPageId, refetchTree]);
 
   const selectPage = useCallback((id: string) => {
+    setPageActionError(null);
+    setPageOverride(null);
     setSelectedPageId(id);
     setMobileSidebarOpen(false);
   }, []);
+
+  const pageSaved = useCallback((updated: PageResource) => {
+    if (visiblePage?.page.title !== updated.page.title) refetchTree();
+    setPageOverride(updated);
+  }, [refetchTree, visiblePage?.page.title]);
 
   return (
     <div className={`workspace-shell ${drawerOpen ? "has-drawer" : ""}`}>
@@ -181,7 +198,7 @@ export function App({ api = defaultApi, realtimeFactory = defaultRealtimeFactory
         <header className="page-topbar">
           <button aria-label="サイドバーを開く" className="icon-button mobile-only" onClick={() => { setMobileSidebarOpen(true); }} type="button"><Icon name="menu" /></button>
           <div className="breadcrumbs" aria-label="パンくずリスト">
-            <span>Nago Wiki</span><Icon name="chevron" /><strong>{page.data?.page.title ?? "読み込み中…"}</strong>
+            <span>Nago Wiki</span><Icon name="chevron" /><strong>{visiblePage?.page.title ?? "読み込み中…"}</strong>
           </div>
           <div className="topbar-actions">
             <button className="button button-quiet" onClick={() => { setDrawerMode("import"); setDrawerOpen(true); }} type="button"><Icon name="book" /> 取り込む</button>
@@ -191,16 +208,18 @@ export function App({ api = defaultApi, realtimeFactory = defaultRealtimeFactory
         </header>
 
         <section className="editor-stage">
-          {page.status === "loading" && <div className="page-skeleton" aria-label="ページを読み込み中"><i /><i /><i /><i /></div>}
+          {pageActionError && <div className="inline-warning is-error page-action-error" role="alert">{pageActionError.message}<button onClick={() => { setPageActionError(null); }} type="button">閉じる</button></div>}
+          {!visiblePage && page.status !== "error" && <div className="page-skeleton" aria-label="ページを読み込み中"><i /><i /><i /><i /></div>}
           {page.status === "error" && <ErrorNotice error={page.error} retry={page.refetch} />}
-          {page.data && (
+          {visiblePage && (
             <KnowledgeEditor
               api={api}
-              key={page.data.page.id}
+              key={visiblePage.page.id}
               onOpenComments={() => { setDrawerMode("comments"); setDrawerOpen(true); }}
               onOpenVersions={() => { setDrawerMode("versions"); setDrawerOpen(true); }}
+              onSaved={pageSaved}
               realtimeFactory={realtimeFactory}
-              resource={page.data}
+              resource={visiblePage}
             />
           )}
         </section>
@@ -214,8 +233,8 @@ export function App({ api = defaultApi, realtimeFactory = defaultRealtimeFactory
         </div>
         <div className="drawer-scroll">
           {(drawerMode === "search" || drawerMode === "ai") && <SearchDrawer api={api} mode={drawerMode} onModeChange={setDrawerMode} onSelectPage={selectPage} />}
-          {(drawerMode === "comments" || drawerMode === "versions") && page.data && (
-            <ActivityDrawer api={api} baseRevision={page.data.page.revision} mode={drawerMode} onRestored={page.refetch} pageId={page.data.page.id} />
+          {(drawerMode === "comments" || drawerMode === "versions") && visiblePage && (
+            <ActivityDrawer api={api} baseRevision={visiblePage.page.revision} key={`${drawerMode}-${visiblePage.page.id}`} mode={drawerMode} onRestored={() => { setPageOverride(null); page.refetch(); }} pageId={visiblePage.page.id} />
           )}
           {drawerMode === "import" && <ImportDrawer api={api} onApplied={(pageId) => { tree.refetch(); selectPage(pageId); setDrawerOpen(false); }} parentPageId={effectiveSelectedPageId} />}
         </div>

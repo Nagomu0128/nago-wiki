@@ -193,7 +193,16 @@ export function KnowledgeEditor({
       onSaved?.(updated);
     } catch (error) {
       if (error instanceof RevisionConflictFailure) {
-        setConflict(error);
+        let resolvedConflict = error;
+        if (!error.latest) {
+          try {
+            const latest = await api.getPage(resource.page.id);
+            resolvedConflict = new RevisionConflictFailure(error.message, error.requestId, latest, error.details);
+          } catch {
+            // The original conflict remains actionable through a retry after the page is reachable again.
+          }
+        }
+        setConflict(resolvedConflict);
         setSaveStatus("conflict");
       } else {
         setSaveError(error instanceof Error ? error : new Error(String(error)));
@@ -289,6 +298,13 @@ export function KnowledgeEditor({
     await api.trashPage(resource.page.id);
   };
 
+  const runPageAction = (action: () => Promise<unknown>) => {
+    void action().catch((error: unknown) => {
+      setSaveError(error instanceof Error ? error : new Error(String(error)));
+      setSaveStatus("error");
+    });
+  };
+
   return (
     <article className="knowledge-editor">
       <div className="editor-meta-row">
@@ -319,8 +335,8 @@ export function KnowledgeEditor({
           <details className="page-menu">
             <summary aria-label="ページ操作">•••</summary>
             <div>
-              <button onClick={() => { void moveToRoot(); }} type="button">ルートへ移動</button>
-              <button className="danger" onClick={() => { void trash(); }} type="button">ゴミ箱へ移動</button>
+              <button onClick={() => { runPageAction(moveToRoot); }} type="button">ルートへ移動</button>
+              <button className="danger" onClick={() => { runPageAction(trash); }} type="button">ゴミ箱へ移動</button>
             </div>
           </details>
         </div>
