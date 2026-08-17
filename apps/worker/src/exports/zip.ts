@@ -42,9 +42,9 @@ export function planStoredZip(
     centralSize += BigInt(centralRecordLength(entry));
   }
   const needsZip64 =
-    centralOffset > ZIP32_MAX ||
-    centralSize > ZIP32_MAX ||
-    entries.length > 0xffff;
+    centralOffset >= ZIP32_MAX ||
+    centralSize >= ZIP32_MAX ||
+    entries.length >= 0xffff;
   const trailerSize = BigInt(22 + (needsZip64 ? 76 : 0));
   return {
     entries,
@@ -97,11 +97,11 @@ export function buildCentralDirectory(
     const crc = crcByName.get(entry.name);
     if (crc === undefined) throw new Error(`Missing CRC for ZIP entry ${entry.name}`);
     const name = encoder.encode(entry.name);
-    const needsZip64Offset = BigInt(entry.localOffset) > ZIP32_MAX;
+    const needsZip64Offset = BigInt(entry.localOffset) >= ZIP32_MAX;
     const extra = needsZip64Offset ? zip64OffsetExtra(entry.localOffset) : new Uint8Array();
     writeUint32(view, offset, CENTRAL_DIRECTORY_SIGNATURE);
     writeUint16(view, offset + 4, needsZip64Offset ? 45 : 20);
-    writeUint16(view, offset + 6, 20);
+    writeUint16(view, offset + 6, needsZip64Offset ? 45 : 20);
     writeUint16(view, offset + 8, UTF8_WITH_DATA_DESCRIPTOR);
     writeUint16(view, offset + 10, 0);
     writeUint16(view, offset + 12, 0);
@@ -150,7 +150,7 @@ function centralRecordLength(entry: ZipEntryPlan): number {
   return (
     46 +
     encoder.encode(entry.name).byteLength +
-    (BigInt(entry.localOffset) > ZIP32_MAX ? 12 : 0)
+    (BigInt(entry.localOffset) >= ZIP32_MAX ? 12 : 0)
   );
 }
 
@@ -206,9 +206,9 @@ function zip64OffsetExtra(localOffset: number): Uint8Array {
 
 function needsZip64End(plan: ZipArchivePlan): boolean {
   return (
-    BigInt(plan.centralOffset) > ZIP32_MAX ||
-    BigInt(plan.centralSize) > ZIP32_MAX ||
-    plan.entries.length > 0xffff
+    BigInt(plan.centralOffset) >= ZIP32_MAX ||
+    BigInt(plan.centralSize) >= ZIP32_MAX ||
+    plan.entries.length >= 0xffff
   );
 }
 
@@ -217,7 +217,7 @@ function validateEntry(file: { name: string; size: number }): void {
   if (nameLength === 0 || nameLength > 0xffff) {
     throw new Error("ZIP entry name must contain 1 to 65535 UTF-8 bytes");
   }
-  if (!Number.isSafeInteger(file.size) || file.size < 0 || file.size > Number(ZIP32_MAX)) {
+  if (!Number.isSafeInteger(file.size) || file.size < 0 || file.size >= Number(ZIP32_MAX)) {
     throw new Error(`ZIP entry size is not supported for ${file.name}`);
   }
 }
