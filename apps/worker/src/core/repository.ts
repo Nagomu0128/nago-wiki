@@ -152,9 +152,11 @@ export class D1WikiRepository {
         `SELECT u.*, e.external_subject
          FROM external_identities e
          JOIN users u ON u.id = e.user_id
-         WHERE e.provider = 'cloudflare_access' AND e.external_subject = ?`,
+         WHERE e.provider = 'cloudflare_access'
+           AND e.external_subject = ?
+           AND u.workspace_id = ?`,
       )
-      .bind(claims.sub)
+      .bind(claims.sub, workspaceId)
       .first<IdentityUserRow>();
     if (existingIdentity !== null) {
       return mapIdentity(existingIdentity, claims);

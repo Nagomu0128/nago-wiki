@@ -23,6 +23,7 @@ import type { McpRuntimeEnv } from "./mcp/types";
 import { PageRoom } from "./realtime/page-room";
 import { createRealtimeRoutes } from "./realtime/routes";
 import { createPagesRoutes } from "./routes/pages";
+import { createSessionRoutes } from "./routes/session";
 
 export { DiscordGatewayContainer, PageRoom };
 export { ImportWorkflow } from "./imports/workflow";
@@ -47,6 +48,7 @@ const exposeIdentity: MiddlewareHandler<CoreHonoEnv> = async (context, next) => 
 
 for (const path of [
   "/api/v1/tree",
+  "/api/v1/me",
   "/api/v1/pages",
   "/api/v1/pages/*",
   "/api/v1/search",
@@ -83,6 +85,7 @@ app.route(
   "/api/v1",
   createPagesRoutes({ createService: createRealtimeWikiCoreService }),
 );
+app.route("/api/v1", createSessionRoutes());
 app.route("/api/v1", createAiRoutes());
 app.route("/api/v1", createImportRoutes());
 app.route("/api/v1", createBotRoutes());
