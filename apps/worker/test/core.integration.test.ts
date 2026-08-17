@@ -164,6 +164,31 @@ describe("D1 wiki core", () => {
     expect((await service.getPage(editor, child.page.id)).page.status).toBe("active");
   });
 
+  it("does not restore a child trashed by an earlier operation", async () => {
+    const parent = await service.createPage(editor, {
+      parentId: null,
+      title: "Parent",
+      bodyMd: "",
+      accessMode: "workspace",
+    });
+    const child = await service.createPage(editor, {
+      parentId: parent.page.id,
+      title: "Child",
+      bodyMd: "",
+      accessMode: "workspace",
+    });
+
+    await service.trashPage(editor, child.page.id);
+    await service.trashPage(editor, parent.page.id);
+    await service.restorePage(editor, parent.page.id);
+
+    await expect(service.getPage(editor, child.page.id)).rejects.toMatchObject({
+      code: "PAGE_NOT_FOUND",
+    });
+    await service.restorePage(editor, child.page.id);
+    expect((await service.getPage(editor, child.page.id)).page.status).toBe("active");
+  });
+
   it("restores immutable version content as a new revision", async () => {
     const created = await service.createPage(editor, {
       parentId: null,
