@@ -68,5 +68,12 @@ describe("WikiAnswerService", () => {
 
     expect(result.citations).toHaveLength(1);
     expect(result.citations[0]?.chunkId).toBe("real");
+    expect(generate).toHaveBeenCalledWith(
+      "user-1",
+      "known",
+      "wiki_only",
+      expect.any(Array),
+      undefined,
+    );
   });
 });

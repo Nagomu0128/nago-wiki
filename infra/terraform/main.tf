@@ -47,6 +47,30 @@ resource "cloudflare_ai_gateway" "wiki" {
   rate_limiting_interval     = 60
   rate_limiting_limit        = 120
   rate_limiting_technique    = "fixed"
+  spend_limits = {
+    enabled = true
+    rules = [
+      {
+        enabled    = true
+        limit      = var.ai_monthly_budget_usd
+        limit_type = "cost"
+        technique  = "fixed"
+        window     = 2592000
+      },
+      {
+        enabled    = true
+        limit      = var.ai_user_monthly_budget_usd
+        limit_type = "cost"
+        technique  = "fixed"
+        window     = 2592000
+        metadata = {
+          user_id = {
+            mode = "partition"
+          }
+        }
+      },
+    ]
+  }
 }
 
 resource "cloudflare_ai_search_instance" "wiki" {

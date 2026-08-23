@@ -1,3 +1,5 @@
 cloudflare_account_id = "replace-with-your-account-id"
 environment           = "dev"
 d1_primary_location   = "apac"
+ai_monthly_budget_usd      = 2
+ai_user_monthly_budget_usd = 1.5

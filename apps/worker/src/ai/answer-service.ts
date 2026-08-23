@@ -20,6 +20,7 @@ const modelAnswerSchema = z.object({
 
 export interface AnswerModel {
   generate(
+    userId: string,
     question: string,
     knowledgeMode: AnswerRequest["knowledgeMode"],
     chunks: AuthorizedChunk[],
@@ -35,6 +36,7 @@ export class WorkersAiAnswerModel implements AnswerModel {
   ) {}
 
   public async generate(
+    userId: string,
     question: string,
     knowledgeMode: AnswerRequest["knowledgeMode"],
     chunks: AuthorizedChunk[],
@@ -109,7 +111,7 @@ export class WorkersAiAnswerModel implements AnswerModel {
           // Wiki context and answers are private data. Gateway policy controls
           // rate/spend, but request and response bodies must not be retained.
           collectLog: false,
-          metadata: { feature: "wiki-answer" },
+          metadata: { feature: "wiki-answer", user_id: userId },
           retries: { maxAttempts: 3, backoff: "exponential" },
         },
         tags: ["nago-wiki", "answer"],
@@ -150,6 +152,7 @@ export class WikiAnswerService {
     }
 
     const generated = await this.model.generate(
+      userId,
       request.query,
       request.knowledgeMode,
       search.results,
