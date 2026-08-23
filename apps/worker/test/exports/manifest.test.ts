@@ -264,7 +264,7 @@ describe("portable export manifest", () => {
   });
 
   it("rejects broken graph references and unsafe archive paths", () => {
-    const manifest: unknown = JSON.parse(
+    expect(() =>
       buildPortableManifest(
         {
           exportId: "invalid-export",
@@ -311,9 +311,7 @@ describe("portable export manifest", () => {
         },
         new Map(),
       ),
-    );
-
-    expect(() => parsePortableManifest(manifest)).toThrow();
+    ).toThrow();
   });
 });
 
