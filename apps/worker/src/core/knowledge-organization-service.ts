@@ -87,15 +87,14 @@ export class KnowledgeOrganizationService {
     await this.database.batch([
       this.database
         .prepare(
-          `UPDATE user_page_state SET favorited_at = NULL
-            WHERE user_id = ?1 AND page_id = ?2`,
+          `DELETE FROM user_page_state
+            WHERE user_id = ?1 AND page_id = ?2 AND last_viewed_at IS NULL`,
         )
         .bind(identity.id, pageId),
       this.database
         .prepare(
-          `DELETE FROM user_page_state
-            WHERE user_id = ?1 AND page_id = ?2
-              AND favorited_at IS NULL AND last_viewed_at IS NULL`,
+          `UPDATE user_page_state SET favorited_at = NULL
+            WHERE user_id = ?1 AND page_id = ?2`,
         )
         .bind(identity.id, pageId),
     ]);

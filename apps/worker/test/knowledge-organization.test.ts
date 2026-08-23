@@ -48,6 +48,24 @@ describe("knowledge organization", () => {
     await expect(service.listRecent(viewer)).resolves.toHaveLength(1);
   });
 
+  it("removes a favorite that has no view history without violating state constraints", async () => {
+    const pageId = await insertPage(editor.id, {
+      title: "Favorite only",
+      slug: "favorite-only",
+    });
+
+    await service.setFavorite(viewer, pageId, true);
+    await expect(service.setFavorite(viewer, pageId, false)).resolves.toBeUndefined();
+    await expect(service.listFavorites(viewer)).resolves.toEqual([]);
+
+    const state = await env.DB.prepare(
+      "SELECT page_id FROM user_page_state WHERE user_id = ? AND page_id = ?",
+    )
+      .bind(viewer.id, pageId)
+      .first<{ page_id: string }>();
+    expect(state).toBeNull();
+  });
+
   it("omits trashed descendants from the trash root list and marks dependencies", async () => {
     const parentId = await insertPage(editor.id, {
       title: "Trashed root",
