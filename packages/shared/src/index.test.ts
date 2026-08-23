@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   createPageRequestSchema,
+  replacePageAclRequestSchema,
   healthResponseSchema,
   updatePageRequestSchema,
   workspaceRoleSchema,
@@ -34,5 +35,18 @@ describe("shared contracts", () => {
     expect(
       updatePageRequestSchema.parse({ baseRevision: 3, bodyMd: "changed" }),
     ).toMatchObject({ baseRevision: 3 });
+  });
+
+  it("rejects duplicate members in an ACL replacement", () => {
+    const userId = "00000000-0000-7000-8000-000000000010";
+    expect(() =>
+      replacePageAclRequestSchema.parse({
+        baseRevision: 0,
+        entries: [
+          { userId, permission: "viewer" },
+          { userId, permission: "editor" },
+        ],
+      }),
+    ).toThrow();
   });
 });
