@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 export * from "./auth";
+export * from "./admin";
 export * from "./errors";
 export * from "./knowledge-organization";
 export * from "./search";
