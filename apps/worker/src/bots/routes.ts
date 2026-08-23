@@ -11,6 +11,7 @@ import {
   reserveBotEvent,
 } from "./service";
 import { verifyBridgeSignature } from "./signatures";
+import { readBoundedText } from "../core/bounded-body";
 import type { McpRuntimeEnv } from "../mcp/types";
 
 interface BotApi {
@@ -37,6 +38,9 @@ const discordSessionSchema = z.object({
   shardCount: z.number().int().positive().max(1_000),
   shardId: z.number().int().nonnegative().max(999),
 });
+
+const MAX_DISCORD_QUERY_BYTES = 64 * 1024;
+const MAX_DISCORD_SESSION_BYTES = 16 * 1024;
 
 export function createBotRoutes(): Hono<BotApi> {
   const routes = new Hono<BotApi>();
@@ -66,7 +70,7 @@ export function createBotRoutes(): Hono<BotApi> {
   );
 
   routes.post("/internal/bot-query", async (context) => {
-    const body = await context.req.text();
+    const body = await readBoundedText(context.req.raw, MAX_DISCORD_QUERY_BYTES);
     const verified = await verifyBridgeSignature(
       body,
       context.req.header("x-nago-timestamp") ?? null,
@@ -102,7 +106,7 @@ export function createBotRoutes(): Hono<BotApi> {
   });
 
   routes.put("/internal/discord-session/:shardId", async (context) => {
-    const body = await context.req.text();
+    const body = await readBoundedText(context.req.raw, MAX_DISCORD_SESSION_BYTES);
     await requireBridgeSignature(context.req.raw, context.env.DISCORD_BRIDGE_SECRET, body);
     const shardId = parseShardId(context.req.param("shardId"));
     const parsed = z.object({ session: discordSessionSchema.nullable() }).safeParse(

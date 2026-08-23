@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { readBoundedText } from "../core/bounded-body";
 import type { BotQueryJob } from "../jobs/contracts";
 import type { McpRuntimeEnv } from "../mcp/types";
 import { reserveBotEvent } from "./service";
@@ -30,12 +31,13 @@ const lineEventSchema = z.object({
 });
 
 const webhookSchema = z.object({ events: z.array(z.unknown()).max(100) });
+const MAX_LINE_WEBHOOK_BYTES = 1024 * 1024;
 
 export async function handleLineWebhook(
   request: Request,
   environment: McpRuntimeEnv,
 ): Promise<Response> {
-  const body = await request.text();
+  const body = await readBoundedText(request, MAX_LINE_WEBHOOK_BYTES);
   if (
     !(await verifyLineSignature(
       body,
