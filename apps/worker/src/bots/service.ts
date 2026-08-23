@@ -262,15 +262,28 @@ async function resolveWorkspace(
 ): Promise<string | null> {
   if (externalChannelId === null) {
     const workspace = await database
-      .prepare(`SELECT id FROM workspaces ORDER BY created_at ASC LIMIT 1`)
+      .prepare(
+        `SELECT workspaces.id
+           FROM workspaces
+           LEFT JOIN workspace_bot_settings AS settings
+             ON settings.workspace_id = workspaces.id AND settings.provider = ?1
+          WHERE coalesce(settings.enabled, 1) = 1
+          ORDER BY workspaces.created_at ASC
+          LIMIT 1`,
+      )
+      .bind(provider)
       .first<WorkspaceRow>();
     return workspace?.id ?? null;
   }
   const allowed = await database
     .prepare(
-      `SELECT workspace_id
-         FROM bot_channel_allowlist
-        WHERE provider = ?1 AND external_channel_id = ?2 AND enabled = 1`,
+      `SELECT allowlist.workspace_id
+         FROM bot_channel_allowlist AS allowlist
+         LEFT JOIN workspace_bot_settings AS settings
+           ON settings.workspace_id = allowlist.workspace_id
+          AND settings.provider = allowlist.provider
+        WHERE allowlist.provider = ?1 AND allowlist.external_channel_id = ?2
+          AND allowlist.enabled = 1 AND coalesce(settings.enabled, 1) = 1`,
     )
     .bind(provider, externalChannelId)
     .first<AllowlistRow>();

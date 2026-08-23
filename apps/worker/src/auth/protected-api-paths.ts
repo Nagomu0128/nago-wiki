@@ -14,4 +14,6 @@ export const accessProtectedApiPaths = [
   "/api/v1/exports",
   "/api/v1/exports/*",
   "/api/v1/account-links",
+  "/api/v1/account-links/*",
+  "/api/v1/admin/*",
 ] as const;

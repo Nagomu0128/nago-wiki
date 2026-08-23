@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import type { MiddlewareHandler } from "hono";
 
 import { createAiRoutes } from "./ai/routes";
+import { createAdminRoutes } from "./admin/routes";
 import { createAccessAuthenticationMiddleware } from "./auth/access";
 import { accessProtectedApiPaths } from "./auth/protected-api-paths";
 import { createBotRoutes } from "./bots/routes";
@@ -91,6 +92,7 @@ app.route(
 app.route("/api/v1", createSessionRoutes());
 app.route("/api/v1", createOrganizationRoutes());
 app.route("/api/v1", createAssetRoutes());
+app.route("/api/v1", createAdminRoutes());
 app.route("/api/v1", createAiRoutes());
 app.route("/api/v1", createImportRoutes());
 app.route("/api/v1", createExportRoutes());
