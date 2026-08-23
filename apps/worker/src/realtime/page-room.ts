@@ -12,6 +12,7 @@ import {
   parseRealtimeMessage,
 } from "./protocol";
 import { PageRoomStorage } from "./storage";
+import { D1RealtimePermissionAuthorizer } from "./permission-authorizer";
 import {
   REALTIME_AUTH_HEADER,
   REALTIME_SUBPROTOCOL,
@@ -27,6 +28,7 @@ const CLOSE_INVALID_MESSAGE = 4400;
 const MAX_MARKDOWN_BYTES = 1_048_576;
 const MAX_REALTIME_UPDATE_BYTES = MAX_MARKDOWN_BYTES + 65_536;
 const MAX_YDOC_STATE_BYTES = MAX_MARKDOWN_BYTES * 4;
+const REAUTHORIZATION_INTERVAL_MS = 30_000;
 
 export function validateRealtimeUpdate(
   document: Y.Doc,
@@ -84,11 +86,13 @@ export class PageRoom extends DurableObject<PageRoomEnv> {
   private document = new Y.Doc();
   private readonly roomStorage: PageRoomStorage;
   private readonly currentBody: CurrentBodyAdapter;
+  private readonly permissionAuthorizer: D1RealtimePermissionAuthorizer;
 
   public constructor(ctx: DurableObjectState, env: PageRoomEnv) {
     super(ctx, env);
     this.roomStorage = new PageRoomStorage(ctx.storage);
     this.currentBody = this.createCurrentBodyAdapter(env.DB);
+    this.permissionAuthorizer = new D1RealtimePermissionAuthorizer(env.DB);
 
     void ctx.blockConcurrencyWhile(() => {
       this.roomStorage.initializeSchema();
@@ -133,6 +137,14 @@ export class PageRoom extends DurableObject<PageRoomEnv> {
     if (this.roomStorage.getMeta().frozen) {
       return new Response("Not Found", { status: 404 });
     }
+    const currentPermission = await this.permissionAuthorizer.permission(
+      authorization.workspaceId,
+      authorization.pageId,
+      authorization.userId,
+    );
+    if (currentPermission === null) {
+      return new Response("Not Found", { status: 404 });
+    }
 
     const initialized = await this.ensureInitialized(
       authorization.workspaceId,
@@ -147,13 +159,14 @@ export class PageRoom extends DurableObject<PageRoomEnv> {
     const server = pair[1];
     const attachment: ConnectionAttachment = {
       ...authorization,
+      permission: currentPermission,
       connectedAt: Date.now(),
     };
     server.serializeAttachment(attachment);
     this.ctx.acceptWebSocket(server);
     sendControl(server, {
       type: "permission",
-      permission: authorization.permission,
+      permission: currentPermission,
     });
     server.send(encodeSyncStep1(this.document));
     await this.scheduleNextAlarm();
@@ -188,6 +201,11 @@ export class PageRoom extends DurableObject<PageRoomEnv> {
       webSocket.close(CLOSE_FORBIDDEN, "Page unavailable");
       return;
     }
+    const refreshedAttachment = await this.refreshConnectionPermission(
+      webSocket,
+      attachment,
+    );
+    if (refreshedAttachment === null) return;
     if (typeof message === "string") {
       sendControl(webSocket, {
         type: "error",
@@ -211,7 +229,7 @@ export class PageRoom extends DurableObject<PageRoomEnv> {
       const parsed = parseRealtimeMessage(
         message,
         this.document,
-        attachment.permission === "editor",
+        refreshedAttachment.permission === "editor",
       );
       if (parsed.kind === "reply") {
         webSocket.send(parsed.reply);
@@ -249,11 +267,11 @@ export class PageRoom extends DurableObject<PageRoomEnv> {
       const persisted = this.roomStorage.persistUpdate(
         parsed.update,
         Date.now(),
-        attachment.userId,
+        refreshedAttachment.userId,
       );
       Y.applyUpdate(this.document, parsed.update, webSocket);
       await this.scheduleNextAlarm(persisted.nextFlushAt);
-      this.broadcastBinary(parsed.broadcast, webSocket);
+      await this.broadcastBinary(parsed.broadcast, webSocket);
     } catch (error) {
       console.warn(
         JSON.stringify({
@@ -295,6 +313,7 @@ export class PageRoom extends DurableObject<PageRoomEnv> {
   public override async alarm(): Promise<void> {
     const now = Date.now();
     this.closeExpiredConnections(now);
+    await this.reauthorizeConnections();
     const meta = this.roomStorage.getMeta();
 
     if (
@@ -360,7 +379,7 @@ export class PageRoom extends DurableObject<PageRoomEnv> {
     );
     Y.applyUpdate(this.document, update, input.requestedBy);
     await this.scheduleNextAlarm(persisted.nextFlushAt);
-    this.broadcastBinaryUpdate(update);
+    await this.broadcastBinaryUpdate(update);
     return {
       ok: true,
       sequence: persisted.sequence,
@@ -546,17 +565,68 @@ export class PageRoom extends DurableObject<PageRoomEnv> {
     }
   }
 
+  private async reauthorizeConnections(): Promise<void> {
+    await Promise.all(
+      this.ctx.getWebSockets().map(async (webSocket) => {
+        const attachment = readAttachment(webSocket);
+        if (attachment !== null && attachment.expiresAt > Date.now()) {
+          await this.refreshConnectionPermission(webSocket, attachment);
+        }
+      }),
+    );
+  }
+
+  private async refreshConnectionPermission(
+    webSocket: WebSocket,
+    attachment: ConnectionAttachment,
+  ): Promise<ConnectionAttachment | null> {
+    if (attachment.expiresAt <= Date.now()) {
+      sendControl(webSocket, {
+        type: "error",
+        code: "AUTH_EXPIRED",
+        message: "The realtime session has expired",
+      });
+      webSocket.close(CLOSE_UNAUTHORIZED, "Session expired");
+      return null;
+    }
+    const nextPermission = await this.permissionAuthorizer.permission(
+      attachment.workspaceId,
+      attachment.pageId,
+      attachment.userId,
+    );
+    if (nextPermission === null) {
+      sendControl(webSocket, {
+        type: "error",
+        code: "FORBIDDEN",
+        message: "Access to this page was revoked",
+      });
+      webSocket.close(CLOSE_FORBIDDEN, "Access revoked");
+      return null;
+    }
+    if (nextPermission === attachment.permission) return attachment;
+    const updated = { ...attachment, permission: nextPermission };
+    webSocket.serializeAttachment(updated);
+    sendControl(webSocket, { type: "permission", permission: nextPermission });
+    return updated;
+  }
+
   private async scheduleNextAlarm(preferredFlushAt?: number): Promise<void> {
     const meta = this.roomStorage.getMeta();
     let nextAt = preferredFlushAt ?? meta.nextFlushAt;
     const now = Date.now();
+    let hasActiveConnection = false;
     for (const webSocket of this.ctx.getWebSockets()) {
       const attachment = readAttachment(webSocket);
       if (attachment !== null && attachment.expiresAt > now) {
+        hasActiveConnection = true;
         nextAt = nextAt === null
           ? attachment.expiresAt
           : Math.min(nextAt, attachment.expiresAt);
       }
+    }
+    if (hasActiveConnection) {
+      const reauthorizeAt = now + REAUTHORIZATION_INTERVAL_MS;
+      nextAt = nextAt === null ? reauthorizeAt : Math.min(nextAt, reauthorizeAt);
     }
 
     if (nextAt === null) {
@@ -566,20 +636,27 @@ export class PageRoom extends DurableObject<PageRoomEnv> {
     }
   }
 
-  private broadcastBinary(message: Uint8Array, sender?: WebSocket): void {
-    for (const webSocket of this.ctx.getWebSockets()) {
+  private async broadcastBinary(message: Uint8Array, sender?: WebSocket): Promise<void> {
+    await Promise.all(this.ctx.getWebSockets().map(async (webSocket) => {
       if (webSocket !== sender) {
+        const attachment = readAttachment(webSocket);
+        if (
+          attachment === null ||
+          (await this.refreshConnectionPermission(webSocket, attachment)) === null
+        ) {
+          return;
+        }
         try {
           webSocket.send(message);
         } catch {
           webSocket.close(1011, "Broadcast failed");
         }
       }
-    }
+    }));
   }
 
-  private broadcastBinaryUpdate(update: Uint8Array): void {
-    this.broadcastBinary(encodeSyncUpdate(update));
+  private broadcastBinaryUpdate(update: Uint8Array): Promise<void> {
+    return this.broadcastBinary(encodeSyncUpdate(update));
   }
 }
 
