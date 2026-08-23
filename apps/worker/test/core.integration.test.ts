@@ -142,6 +142,64 @@ describe("D1 wiki core", () => {
     ).rejects.toMatchObject({ code: "INVALID_PAGE_MOVE", status: 409 });
   });
 
+  it("atomically rejects one side of concurrent moves that would form a cycle", async () => {
+    const left = await service.createPage(editor, {
+      parentId: null,
+      title: "Left",
+      bodyMd: "",
+      accessMode: "workspace",
+    });
+    const right = await service.createPage(editor, {
+      parentId: null,
+      title: "Right",
+      bodyMd: "",
+      accessMode: "workspace",
+    });
+
+    const results = await Promise.allSettled([
+      service.movePage(editor, left.page.id, { parentId: right.page.id }),
+      service.movePage(editor, right.page.id, { parentId: left.page.id }),
+    ]);
+
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+    const rows = await env.DB.prepare(
+      "SELECT id, parent_id FROM pages WHERE id IN (?1, ?2) ORDER BY id",
+    )
+      .bind(left.page.id, right.page.id)
+      .all<{ id: string; parent_id: string | null }>();
+    expect(rows.results.every((row) => row.parent_id !== row.id)).toBe(true);
+    expect(
+      rows.results.every((row) => {
+        const parent = rows.results.find((candidate) => candidate.id === row.parent_id);
+        return parent?.parent_id !== row.id;
+      }),
+    ).toBe(true);
+  });
+
+  it("requires an owner to move inherited workspace content out of a restriction", async () => {
+    const restricted = await service.createPage(editor, {
+      parentId: null,
+      title: "Restricted move",
+      bodyMd: "",
+      accessMode: "restricted",
+    });
+    const child = await service.createPage(editor, {
+      parentId: restricted.page.id,
+      title: "Inherited child",
+      bodyMd: "",
+      accessMode: "workspace",
+    });
+
+    await expect(
+      service.movePage(editor, child.page.id, { parentId: null }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN", status: 403 });
+    await service.movePage(owner, child.page.id, { parentId: null });
+    await expect(service.getPage(viewer, child.page.id)).resolves.toMatchObject({
+      page: { id: child.page.id },
+    });
+  });
+
   it("keeps old links to every descendant working after an ancestor move", async () => {
     const parent = await service.createPage(editor, {
       parentId: null,
@@ -307,7 +365,11 @@ describe("D1 wiki core", () => {
     await service.trashPage(editor, child.page.id);
     await service.trashPage(editor, parent.page.id);
 
-    const restored = await service.restorePage(editor, child.page.id);
+    await expect(service.restorePage(editor, child.page.id)).rejects.toMatchObject({
+      code: "FORBIDDEN",
+      status: 403,
+    });
+    const restored = await service.restorePage(owner, child.page.id);
 
     expect(restored.page.parentId).toBeNull();
     expect(restored.page.slug).toBe("detached-child");

@@ -463,10 +463,27 @@ export class D1WikiRepository {
     const statements: D1PreparedStatement[] = [
       this.database
         .prepare(
-          `UPDATE pages
-           SET parent_id = ?, slug = ?, title = ?, body_md = ?, revision = ?,
-               content_hash = ?, updated_at = ?, last_mutation_id = ?
-           WHERE id = ? AND revision = ? AND status = 'active'`,
+          `WITH RECURSIVE subtree(id) AS (
+             SELECT id FROM pages WHERE id = ?9
+             UNION
+             SELECT child.id FROM pages child
+             JOIN subtree ON child.parent_id = subtree.id
+           )
+           UPDATE pages
+           SET parent_id = ?1, slug = ?2, title = ?3, body_md = ?4, revision = ?5,
+               content_hash = ?6, updated_at = ?7, last_mutation_id = ?8
+           WHERE id = ?9 AND revision = ?10 AND status = 'active'
+             AND (
+               ?1 IS NULL OR (
+                 EXISTS (
+                   SELECT 1 FROM pages destination
+                   WHERE destination.id = ?1
+                     AND destination.workspace_id = pages.workspace_id
+                     AND destination.status = 'active'
+                 )
+                 AND NOT EXISTS (SELECT 1 FROM subtree WHERE id = ?1)
+               )
+             )`,
         )
         .bind(
           input.parentId,
@@ -568,6 +585,16 @@ export class D1WikiRepository {
     }
     if (results[0]?.meta.changes !== 1) {
       const current = await this.getPage(input.pageId);
+      if (
+        current?.status === "active" &&
+        current.revision === input.baseRevision
+      ) {
+        throw new ApiProblem(
+          "INVALID_PAGE_MOVE",
+          409,
+          "The destination is unavailable or belongs to the page subtree",
+        );
+      }
       throw new ApiProblem(
         "REVISION_CONFLICT",
         409,
@@ -820,7 +847,32 @@ export class D1WikiRepository {
     return result.results.map((row) => row.id);
   }
 
-  public async restoreSubtree(pageId: string): Promise<string[]> {
+  public async restrictedBoundaryId(pageId: string): Promise<string | null> {
+    const row = await this.database
+      .prepare(
+        `WITH RECURSIVE ancestors(id, parent_id, access_mode, depth) AS (
+           SELECT id, parent_id, access_mode, 0
+           FROM pages WHERE id = ?1 AND status = 'active'
+           UNION ALL
+           SELECT parent.id, parent.parent_id, parent.access_mode, child.depth + 1
+           FROM pages parent
+           JOIN ancestors child ON child.parent_id = parent.id
+           WHERE parent.status = 'active'
+         )
+         SELECT id FROM ancestors
+         WHERE access_mode = 'restricted'
+         ORDER BY depth ASC
+         LIMIT 1`,
+      )
+      .bind(pageId)
+      .first<IdRow>();
+    return row?.id ?? null;
+  }
+
+  public async restoreSubtree(
+    pageId: string,
+    allowOrphanToRoot: boolean,
+  ): Promise<string[]> {
     const now = new Date().toISOString();
     const trashBatch = await this.database
       .prepare(
@@ -852,6 +904,14 @@ export class D1WikiRepository {
              ), subtree(id) AS (
                SELECT id FROM pages
                WHERE id = ?1 AND status = 'trashed' AND trash_batch_id = ?2
+                 AND (
+                   parent_id IS NULL OR ?6 = 1 OR EXISTS (
+                     SELECT 1 FROM pages active_parent
+                     WHERE active_parent.id = pages.parent_id
+                       AND active_parent.workspace_id = pages.workspace_id
+                       AND active_parent.status = 'active'
+                   )
+                 )
                UNION ALL
                SELECT child.id FROM pages child
                JOIN subtree ON child.parent_id = subtree.id
@@ -885,6 +945,7 @@ export class D1WikiRepository {
             restoredSlug,
             now,
             restoreMutationId,
+            allowOrphanToRoot ? 1 : 0,
           ),
         this.database
           .prepare(

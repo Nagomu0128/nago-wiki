@@ -370,6 +370,23 @@ export class D1WikiCoreService implements WikiCoreService {
         );
       }
     }
+    if (
+      identity.role !== "owner" &&
+      page.accessMode === "workspace" &&
+      request.parentId !== page.parentId
+    ) {
+      const sourceBoundary = await this.repository.restrictedBoundaryId(page.id);
+      const destinationBoundary = request.parentId === null
+        ? null
+        : await this.repository.restrictedBoundaryId(request.parentId);
+      if (sourceBoundary !== null && sourceBoundary !== destinationBoundary) {
+        throw new ApiProblem(
+          "FORBIDDEN",
+          403,
+          "Only an owner can move a page outside its restricted boundary",
+        );
+      }
+    }
     const slug = normalizeSlug(request.slug ?? page.slug);
     const previousAliases = request.parentId !== page.parentId || slug !== page.slug
       ? await this.repository.listSubtreePagePaths(page.id)
@@ -416,8 +433,21 @@ export class D1WikiCoreService implements WikiCoreService {
   ): Promise<PageWithPermission> {
     const page = await this.requirePage(identity, pageId, true, true);
     if (page.status !== "trashed") throw pageNotFound();
-    const restoredIds = await this.repository.restoreSubtree(pageId);
-    if (restoredIds.length === 0) throw pageNotFound();
+    const allowOrphanToRoot = identity.role === "owner" || page.accessMode === "restricted";
+    const restoredIds = await this.repository.restoreSubtree(
+      pageId,
+      allowOrphanToRoot,
+    );
+    if (restoredIds.length === 0) {
+      if (!allowOrphanToRoot && page.parentId !== null) {
+        throw new ApiProblem(
+          "FORBIDDEN",
+          403,
+          "Only an owner can restore this page outside its restricted boundary",
+        );
+      }
+      throw pageNotFound();
+    }
     await this.mutations.thawPages?.(identity, restoredIds);
     const restored = await this.repository.getPage(pageId);
     if (restored === null) throw pageNotFound();
