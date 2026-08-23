@@ -18,5 +18,19 @@ jobs:
         with:
           node-version: 24
           cache: npm
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: "1.14.6"
       - run: npm ci
       - run: npm run check
+      - name: Validate generated Worker bindings
+        working-directory: apps/worker
+        run: npx wrangler types --check --config wrangler.jsonc
+      - name: Validate production Worker bundle
+        run: npx wrangler deploy --dry-run --env production --containers-rollout none --config apps/worker/wrangler.jsonc
+      - name: Check Terraform formatting
+        run: terraform -chdir=infra/terraform fmt -check
+      - name: Initialize Terraform providers
+        run: terraform -chdir=infra/terraform init -backend=false -input=false
+      - name: Validate Terraform configuration
+        run: terraform -chdir=infra/terraform validate
