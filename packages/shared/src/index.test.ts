@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   createPageRequestSchema,
   healthResponseSchema,
+  normalizeWikiPath,
   updatePageRequestSchema,
   workspaceRoleSchema,
 } from "./index";
@@ -34,5 +35,9 @@ describe("shared contracts", () => {
     expect(
       updatePageRequestSchema.parse({ baseRevision: 3, bodyMd: "changed" }),
     ).toMatchObject({ baseRevision: 3 });
+  });
+
+  it("normalizes Wiki paths consistently for aliases and lookups", () => {
+    expect(normalizeWikiPath(" /Ｇuides/Old Page/ ")).toBe("guides/old page");
   });
 });

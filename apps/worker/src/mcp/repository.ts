@@ -1,3 +1,4 @@
+import { normalizeWikiPath } from "@nago-wiki/shared";
 import { D1SearchCandidateAuthorizer } from "../ai/authorizer";
 import type { AuthorizedChunk, SearchCandidate } from "../ai/contracts";
 
@@ -63,7 +64,7 @@ export class McpWikiRepository {
     workspaceId: string,
     path: string,
   ): Promise<ReadablePage | null> {
-    const normalizedPath = path.trim().replace(/^\/+|\/+$/gu, "").toLowerCase();
+    const normalizedPath = normalizeWikiPath(path);
     const match = await this.database
       .prepare(
         `SELECT page_id

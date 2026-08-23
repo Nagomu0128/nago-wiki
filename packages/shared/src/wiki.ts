@@ -173,3 +173,11 @@ export const createCommentRequestSchema = z.object({
 export type CreateCommentRequest = z.infer<
   typeof createCommentRequestSchema
 >;
+
+export function normalizeWikiPath(value: string): string {
+  return value
+    .normalize("NFKC")
+    .trim()
+    .replace(/^\/+|\/+$/gu, "")
+    .toLocaleLowerCase("en-US");
+}

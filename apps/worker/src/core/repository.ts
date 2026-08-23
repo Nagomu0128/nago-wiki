@@ -1,3 +1,4 @@
+import { normalizeWikiPath } from "@nago-wiki/shared";
 import type {
   AuthenticatedIdentity,
   Comment,
@@ -77,6 +78,13 @@ interface IdRow extends Record<string, unknown> {
   id: string;
 }
 
+interface SubtreePathRow extends Record<string, unknown> {
+  id: string;
+  parent_id: string | null;
+  slug: string;
+  depth: number;
+}
+
 interface TrashBatchRow extends Record<string, unknown> {
   trash_batch_id: string;
 }
@@ -122,7 +130,7 @@ export interface PageMutationInput {
   contentHash: string;
   authorId: string;
   reason: PageVersion["reason"];
-  previousPath?: string;
+  previousAliases?: { pageId: string; normalizedPath: string }[];
 }
 
 export interface PageCreationIdempotency {
@@ -527,7 +535,7 @@ export class D1WikiRepository {
           version.id,
         ),
     ];
-    if (input.previousPath !== undefined) {
+    for (const alias of input.previousAliases ?? []) {
       statements.push(
         this.database
           .prepare(
@@ -537,8 +545,8 @@ export class D1WikiRepository {
           )
           .bind(
             page.workspaceId,
-            input.previousPath,
-            page.id,
+            normalizeWikiPath(alias.normalizedPath),
+            alias.pageId,
             updatedAt,
             version.id,
           ),
@@ -727,6 +735,37 @@ export class D1WikiRepository {
     return `/${result.results.map((row) => row.slug).join("/")}`;
   }
 
+  public async listSubtreePagePaths(
+    pageId: string,
+  ): Promise<{ pageId: string; normalizedPath: string }[]> {
+    const rootPath = normalizeWikiPath(await this.getPagePath(pageId));
+    const result = await this.database
+      .prepare(
+        `WITH RECURSIVE subtree(id, parent_id, slug, depth) AS (
+           SELECT id, parent_id, slug, 0
+           FROM pages WHERE id = ? AND status = 'active'
+           UNION ALL
+           SELECT child.id, child.parent_id, child.slug, subtree.depth + 1
+           FROM pages child JOIN subtree ON child.parent_id = subtree.id
+           WHERE child.status = 'active'
+         )
+         SELECT id, parent_id, slug, depth FROM subtree ORDER BY depth, id`,
+      )
+      .bind(pageId)
+      .all<SubtreePathRow>();
+    const paths = new Map<string, string>();
+    for (const row of result.results) {
+      const path = row.depth === 0
+        ? rootPath
+        : `${paths.get(row.parent_id ?? "") ?? rootPath}/${row.slug}`;
+      paths.set(row.id, normalizeWikiPath(path));
+    }
+    return result.results.map((row) => ({
+      pageId: row.id,
+      normalizedPath: paths.get(row.id) ?? rootPath,
+    }));
+  }
+
   public async trashSubtree(pageId: string): Promise<string[]> {
     const now = new Date().toISOString();
     const trashBatchId = createUuidV7();
@@ -792,28 +831,58 @@ export class D1WikiRepository {
       .first<TrashBatchRow>();
     if (trashBatch === null) return [];
     const restoreMutationId = createUuidV7();
+    const root = await this.getPage(pageId);
+    if (root === null) return [];
+    const restoredSlug = restorationSlug(root.slug, now.slice(0, 10), root.id);
     try {
       const results = await this.database.batch<IdRow>([
         this.database
           .prepare(
-            `WITH RECURSIVE subtree(id) AS (
+            `WITH RECURSIVE destination(parent_id) AS (
+               SELECT CASE
+                 WHEN root.parent_id IS NULL OR EXISTS (
+                   SELECT 1 FROM pages parent
+                   WHERE parent.id = root.parent_id
+                     AND parent.workspace_id = root.workspace_id
+                     AND parent.status = 'active'
+                 ) THEN root.parent_id
+                 ELSE NULL
+               END
+               FROM pages root WHERE root.id = ?1
+             ), subtree(id) AS (
                SELECT id FROM pages
-               WHERE id = ? AND status = 'trashed' AND trash_batch_id = ?
+               WHERE id = ?1 AND status = 'trashed' AND trash_batch_id = ?2
                UNION ALL
                SELECT child.id FROM pages child
                JOIN subtree ON child.parent_id = subtree.id
-               WHERE child.status = 'trashed' AND child.trash_batch_id = ?
+               WHERE child.status = 'trashed' AND child.trash_batch_id = ?2
              )
              UPDATE pages
-             SET status = 'active', trashed_at = NULL, trash_batch_id = NULL,
-                 updated_at = ?, last_mutation_id = ?
+             SET parent_id = CASE
+                   WHEN id = ?1 THEN (SELECT parent_id FROM destination)
+                   ELSE parent_id
+                 END,
+                 slug = CASE
+                   WHEN id = ?1 AND EXISTS (
+                     SELECT 1 FROM pages occupied
+                     WHERE occupied.workspace_id = pages.workspace_id
+                       AND ifnull(occupied.parent_id, '') =
+                           ifnull((SELECT parent_id FROM destination), '')
+                       AND occupied.slug = pages.slug
+                       AND occupied.status = 'active'
+                       AND occupied.id <> pages.id
+                   ) THEN ?3
+                   ELSE slug
+                 END,
+                 status = 'active', trashed_at = NULL, trash_batch_id = NULL,
+                 updated_at = ?4, last_mutation_id = ?5
              WHERE id IN (SELECT id FROM subtree)
              RETURNING id`,
           )
           .bind(
             pageId,
             trashBatch.trash_batch_id,
-            trashBatch.trash_batch_id,
+            restoredSlug,
             now,
             restoreMutationId,
           ),
@@ -939,6 +1008,11 @@ export class D1WikiRepository {
         version.createdAt,
       );
   }
+}
+
+function restorationSlug(slug: string, date: string, pageId: string): string {
+  const suffix = `-restored-${date}-${pageId.toLocaleLowerCase("en-US")}`;
+  return `${slug.slice(0, Math.max(1, 200 - suffix.length))}${suffix}`;
 }
 
 export function pageNotFound(): ApiProblem {

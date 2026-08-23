@@ -1,3 +1,5 @@
+import { normalizeWikiPath } from "@nago-wiki/shared";
+
 const wikiLinkPattern = /\[\[([^\]|\r\n]+)(?:\|[^\]\r\n]*)?\]\]/gu;
 
 export function extractWikiLinkTargets(markdown: string): string[] {
@@ -82,12 +84,4 @@ async function resolveTarget(
     .bind(workspaceId, slug)
     .all<{ id: string }>();
   return matches.results.length === 1 ? (matches.results[0]?.id ?? null) : null;
-}
-
-function normalizeWikiPath(value: string): string {
-  return value
-    .normalize("NFKC")
-    .trim()
-    .replace(/^\/+|\/+$/gu, "")
-    .toLocaleLowerCase("en-US");
 }

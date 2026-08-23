@@ -370,18 +370,21 @@ export class D1WikiCoreService implements WikiCoreService {
         );
       }
     }
-    const previousPath = await this.repository.getPagePath(page.id);
+    const slug = normalizeSlug(request.slug ?? page.slug);
+    const previousAliases = request.parentId !== page.parentId || slug !== page.slug
+      ? await this.repository.listSubtreePagePaths(page.id)
+      : undefined;
     const mutation = await this.repository.mutatePage({
       pageId: page.id,
       baseRevision: page.revision,
       parentId: request.parentId,
-      slug: normalizeSlug(request.slug ?? page.slug),
+      slug,
       title: request.title ?? page.title,
       bodyMd: page.bodyMd,
       contentHash: page.contentHash,
       authorId: identity.id,
       reason: "move",
-      previousPath,
+      ...(previousAliases === undefined ? {} : { previousAliases }),
     });
     if (this.directMutations !== undefined) {
       await this.directMutations.persistVersion(mutation.version, page.bodyMd);
@@ -413,16 +416,6 @@ export class D1WikiCoreService implements WikiCoreService {
   ): Promise<PageWithPermission> {
     const page = await this.requirePage(identity, pageId, true, true);
     if (page.status !== "trashed") throw pageNotFound();
-    if (page.parentId !== null) {
-      const parent = await this.repository.getPage(page.parentId);
-      if (parent?.status !== "active") {
-        throw new ApiProblem(
-          "INVALID_PAGE_MOVE",
-          409,
-          "Restore the parent page first",
-        );
-      }
-    }
     const restoredIds = await this.repository.restoreSubtree(pageId);
     if (restoredIds.length === 0) throw pageNotFound();
     await this.mutations.thawPages?.(identity, restoredIds);

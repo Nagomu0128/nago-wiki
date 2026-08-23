@@ -13,6 +13,7 @@ import {
   D1WikiRepository,
 } from "../src/core/repository";
 import { TagsService } from "../src/core/tags-service";
+import { refreshPageLinks } from "../src/jobs/wiki-links";
 
 class MemoryVersionBodyStore implements VersionBodyStore {
   readonly #values = new Map<string, string>();
@@ -141,6 +142,61 @@ describe("D1 wiki core", () => {
     ).rejects.toMatchObject({ code: "INVALID_PAGE_MOVE", status: 409 });
   });
 
+  it("keeps old links to every descendant working after an ancestor move", async () => {
+    const parent = await service.createPage(editor, {
+      parentId: null,
+      title: "Parent",
+      bodyMd: "",
+      accessMode: "workspace",
+    });
+    const child = await service.createPage(editor, {
+      parentId: parent.page.id,
+      title: "Child",
+      bodyMd: "",
+      accessMode: "workspace",
+    });
+    const destination = await service.createPage(editor, {
+      parentId: null,
+      title: "Destination",
+      bodyMd: "",
+      accessMode: "workspace",
+    });
+    const source = await service.createPage(editor, {
+      parentId: null,
+      title: "Source",
+      bodyMd: "[[parent/child]]",
+      accessMode: "workspace",
+    });
+
+    await service.movePage(editor, parent.page.id, {
+      parentId: destination.page.id,
+    });
+    await refreshPageLinks(env.DB, {
+      workspaceId: editor.workspaceId,
+      pageId: source.page.id,
+      revision: source.page.revision,
+      markdown: source.page.bodyMd,
+    });
+
+    const link = await env.DB.prepare(
+      `SELECT target_page_id FROM page_links
+        WHERE source_page_id = ? AND raw_target = ?`,
+    )
+      .bind(source.page.id, "parent/child")
+      .first<{ target_page_id: string }>();
+    expect(link?.target_page_id).toBe(child.page.id);
+    const aliases = await env.DB.prepare(
+      `SELECT normalized_path FROM page_aliases
+        WHERE page_id IN (?, ?) ORDER BY normalized_path`,
+    )
+      .bind(parent.page.id, child.page.id)
+      .all<{ normalized_path: string }>();
+    expect(aliases.results.map((alias) => alias.normalized_path)).toEqual([
+      "parent",
+      "parent/child",
+    ]);
+  });
+
   it("trashes and restores an entire subtree", async () => {
     const parent = await service.createPage(editor, {
       parentId: null,
@@ -233,6 +289,51 @@ describe("D1 wiki core", () => {
     });
     await service.restorePage(editor, child.page.id);
     expect((await service.getPage(editor, child.page.id)).page.status).toBe("active");
+  });
+
+  it("restores to root when the original parent is unavailable", async () => {
+    const parent = await service.createPage(editor, {
+      parentId: null,
+      title: "Unavailable parent",
+      bodyMd: "",
+      accessMode: "workspace",
+    });
+    const child = await service.createPage(editor, {
+      parentId: parent.page.id,
+      title: "Detached child",
+      bodyMd: "",
+      accessMode: "workspace",
+    });
+    await service.trashPage(editor, child.page.id);
+    await service.trashPage(editor, parent.page.id);
+
+    const restored = await service.restorePage(editor, child.page.id);
+
+    expect(restored.page.parentId).toBeNull();
+    expect(restored.page.slug).toBe("detached-child");
+  });
+
+  it("appends the restoration date when the destination slug is occupied", async () => {
+    const original = await service.createPage(editor, {
+      parentId: null,
+      title: "Collision",
+      bodyMd: "old",
+      accessMode: "workspace",
+    });
+    await service.trashPage(editor, original.page.id);
+    await service.createPage(editor, {
+      parentId: null,
+      title: "Collision",
+      bodyMd: "new",
+      accessMode: "workspace",
+    });
+
+    const restored = await service.restorePage(editor, original.page.id);
+
+    expect(restored.page.parentId).toBeNull();
+    expect(restored.page.slug).toMatch(
+      /^collision-restored-\d{4}-\d{2}-\d{2}-/u,
+    );
   });
 
   it("restores immutable version content as a new revision", async () => {
