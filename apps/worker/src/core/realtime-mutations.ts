@@ -56,49 +56,18 @@ export class RealtimePageMutationService implements PageMutationService {
       pageRoomKey(identity.workspaceId, page.id),
     );
     const status = await room.flushNow();
-    if (
-      status.dirty ||
-      (status.baseRevision !== expectedBaseRevision &&
-        status.baseRevision !== expectedBaseRevision + 1)
-    ) {
+    if (status.dirty || status.baseRevision !== expectedBaseRevision) {
       throw revisionConflict(status.baseRevision);
     }
-    const now = new Date().toISOString();
-    const results = await this.environment.DB.batch([
-      this.environment.DB.prepare(
-        `UPDATE pages SET title = ?2, updated_at = ?3
-          WHERE id = ?1 AND workspace_id = ?4 AND revision = ?5
-            AND status = 'active'`,
-      ).bind(page.id, title, now, identity.workspaceId, status.baseRevision),
-      this.environment.DB.prepare(
-        `INSERT INTO index_state
-           (page_id, desired_hash, indexed_hash, status, last_error, updated_at)
-         SELECT id, content_hash, NULL, 'pending', NULL, ?2
-           FROM pages WHERE id = ?1 AND revision = ?3
-         ON CONFLICT(page_id) DO UPDATE SET
-           desired_hash = excluded.desired_hash,
-           status = 'pending', last_error = NULL, updated_at = excluded.updated_at`,
-      ).bind(page.id, now, status.baseRevision),
-    ]);
-    if (results[0]?.meta.changes !== 1) {
+    const current = await this.repository.getPage(page.id);
+    if (current?.revision !== expectedBaseRevision || current.status !== "active") {
       throw revisionConflict(status.baseRevision);
     }
-    const result = await this.repository.getPage(page.id);
-    if (result === null) throw new ApiProblem("PAGE_NOT_FOUND", 404, "Page was not found");
-    try {
-      await this.environment.ASYNC_JOBS.send({
-        type: "index-page",
-        jobId: crypto.randomUUID(),
-        workspaceId: identity.workspaceId,
-        pageId: page.id,
-        desiredHash: result.contentHash,
-      });
-    } catch (error) {
-      // index_state remains pending, so the scheduled reconciler can recover
-      // without turning a committed title update into a misleading API error.
-      console.error("Could not enqueue title reindex", error);
-    }
-    return result;
+    return this.replace(identity, current, current.bodyMd, {
+      reason: "edit",
+      title,
+      expectedBaseRevision,
+    });
   }
 
   public async restoreVersion(
@@ -214,22 +183,41 @@ export class RealtimePageMutationService implements PageMutationService {
     }
 
     if (options.title !== undefined && options.title !== page.title) {
-      const updated = await this.environment.DB.prepare(
-        `UPDATE pages SET title = ?2, updated_at = ?3
-          WHERE id = ?1 AND revision = ?4 AND status = 'active'`,
-      )
-        .bind(
-          page.id,
-          options.title,
-          new Date().toISOString(),
-          status.baseRevision,
-        )
-        .run();
-      if (updated.meta.changes !== 1) throw revisionConflict(status.baseRevision);
+      const now = new Date().toISOString();
+      const results = await this.environment.DB.batch([
+        this.environment.DB.prepare(
+          `UPDATE pages SET title = ?2, updated_at = ?3
+            WHERE id = ?1 AND revision = ?4 AND status = 'active'`,
+        ).bind(page.id, options.title, now, status.baseRevision),
+        this.environment.DB.prepare(
+          `UPDATE index_state
+            SET status = 'pending', indexed_hash = NULL, last_error = NULL,
+                updated_at = ?2
+            WHERE page_id = ?1`,
+        ).bind(page.id, now),
+      ]);
+      if (results[0]?.meta.changes !== 1) {
+        throw revisionConflict(status.baseRevision);
+      }
     }
     const result = await this.repository.getPage(page.id);
     if (result === null) {
       throw new ApiProblem("PAGE_NOT_FOUND", 404, "Page was not found or is not visible");
+    }
+    if (options.title !== undefined && options.title !== page.title) {
+      try {
+        await this.environment.ASYNC_JOBS.send({
+          type: "index-page",
+          jobId: crypto.randomUUID(),
+          workspaceId: identity.workspaceId,
+          pageId: page.id,
+          desiredHash: result.contentHash,
+        });
+      } catch (error) {
+        // index_state remains pending, so the scheduled reconciler recovers
+        // without turning a committed title update into a misleading error.
+        console.error("Could not enqueue title reindex", error);
+      }
     }
     return result;
   }

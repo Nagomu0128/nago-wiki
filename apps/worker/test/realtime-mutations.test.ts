@@ -51,7 +51,7 @@ describe("RealtimePageMutationService", () => {
     ]);
   });
 
-  it("preserves a just-flushed collaborative edit when saving only the title", async () => {
+  it("rejects a stale title after flushing a collaborative edit", async () => {
     const send = vi.fn(() => Promise.resolve());
     const replaceMarkdown = vi.fn(() => {
       throw new Error("title updates must not replace realtime Markdown");
@@ -80,27 +80,68 @@ describe("RealtimePageMutationService", () => {
     if (original === null) throw new Error("test page was not created");
     const service = new RealtimePageMutationService(environment, repository);
 
+    await expect(service.updatePage(identity, original, {
+      baseRevision: 1,
+      title: "After",
+    })).rejects.toMatchObject({ code: "REVISION_CONFLICT", status: 409 });
+
+    await expect(repository.getPage(pageId)).resolves.toMatchObject({
+      title: "Before",
+      bodyMd: "collaborative edit",
+      revision: 2,
+    });
+    expect(flushNow).toHaveBeenCalledOnce();
+    expect(replaceMarkdown).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("serializes a title-only save as a new page revision", async () => {
+    const send = vi.fn(() => Promise.resolve());
+    const flushNow = vi
+      .fn()
+      .mockResolvedValueOnce({ baseRevision: 1, dirty: false, nextFlushAt: null })
+      .mockResolvedValueOnce({ baseRevision: 2, dirty: false, nextFlushAt: null });
+    const replaceMarkdown = vi.fn(async () => {
+      await env.DB.prepare(
+        `UPDATE pages SET revision = 2, updated_at = ?2 WHERE id = ?1 AND revision = 1`,
+      )
+        .bind(pageId, new Date().toISOString())
+        .run();
+      await env.DB.prepare(
+        `INSERT INTO index_state
+           (page_id, desired_hash, indexed_hash, status, last_error, updated_at)
+         VALUES (?1, ?2, NULL, 'pending', NULL, ?3)`,
+      )
+        .bind(pageId, "0".repeat(64), new Date().toISOString())
+        .run();
+      return { ok: true as const, sequence: 1, baseRevision: 1 };
+    });
+    const environment = {
+      DB: env.DB,
+      FILES: env.FILES,
+      ASYNC_JOBS: { send },
+      PAGE_ROOM: { getByName: () => ({ flushNow, replaceMarkdown }) },
+    } as unknown as RealtimeMutationEnv;
+    const repository = new D1WikiRepository(env.DB);
+    const original = await repository.getPage(pageId);
+    if (original === null) throw new Error("test page was not created");
+    const service = new RealtimePageMutationService(environment, repository);
+
     const updated = await service.updatePage(identity, original, {
       baseRevision: 1,
       title: "After",
     });
 
-    expect(updated).toMatchObject({
-      title: "After",
-      bodyMd: "collaborative edit",
-      revision: 2,
-      contentHash: "1".repeat(64),
-    });
-    expect(flushNow).toHaveBeenCalledOnce();
-    expect(replaceMarkdown).not.toHaveBeenCalled();
-    expect(send).toHaveBeenCalledWith(
-      expect.objectContaining({
-        type: "index-page",
-        workspaceId: DEFAULT_WORKSPACE_ID,
-        pageId,
-        desiredHash: "1".repeat(64),
-      }),
-    );
+    expect(updated).toMatchObject({ title: "After", revision: 2, bodyMd: "original" });
+    expect(replaceMarkdown).toHaveBeenCalledWith(expect.objectContaining({
+      expectedBaseRevision: 1,
+      bodyMarkdown: "original",
+    }));
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({
+      type: "index-page",
+      workspaceId: DEFAULT_WORKSPACE_ID,
+      pageId,
+    }));
   });
 
   it("freezes every subtree room before trash and can thaw them", async () => {
