@@ -137,3 +137,22 @@ resource "cloudflare_worker" "wiki" {
   }
   tags = ["nago-wiki", var.environment]
 }
+
+# A Workers Custom Domain creates the DNS routing and managed certificate that
+# make the Access-protected hostname reach this Worker. Access alone does not
+# attach a hostname to a Worker.
+resource "cloudflare_workers_custom_domain" "wiki" {
+  count = var.access_domain == null ? 0 : 1
+
+  account_id = var.cloudflare_account_id
+  hostname   = var.access_domain
+  service    = cloudflare_worker.wiki.name
+  zone_id    = var.cloudflare_zone_id
+
+  lifecycle {
+    precondition {
+      condition     = var.cloudflare_zone_id != null
+      error_message = "cloudflare_zone_id is required when access_domain is set."
+    }
+  }
+}

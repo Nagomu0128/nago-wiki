@@ -4,6 +4,21 @@ variable "cloudflare_account_id" {
   sensitive   = true
 }
 
+variable "cloudflare_zone_id" {
+  description = "Cloudflare zone containing access_domain. Required when access_domain is set."
+  type        = string
+  default     = null
+  nullable    = true
+
+  validation {
+    condition = (
+      var.cloudflare_zone_id == null ||
+      can(regex("^[0-9a-fA-F]{32}$", var.cloudflare_zone_id))
+    )
+    error_message = "cloudflare_zone_id must be a 32-character hexadecimal zone ID."
+  }
+}
+
 variable "environment" {
   description = "Resource suffix, for example dev or prod."
   type        = string
