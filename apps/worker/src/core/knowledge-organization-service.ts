@@ -12,6 +12,8 @@ import { ApiProblem } from "./errors";
 import { D1WikiRepository } from "./repository";
 
 const COLLECTION_LIMIT = 50;
+const CANDIDATE_LIMIT = 200;
+const TRASH_RETENTION_MILLISECONDS = 30 * 24 * 60 * 60 * 1_000;
 
 interface NavigationRow extends Record<string, unknown> {
   id: string;
@@ -114,10 +116,10 @@ export class KnowledgeOrganizationService {
           ORDER BY state.last_viewed_at DESC, p.id
           LIMIT ?3`,
       )
-      .bind(identity.id, identity.workspaceId, COLLECTION_LIMIT)
+      .bind(identity.id, identity.workspaceId, CANDIDATE_LIMIT)
       .all<RecentRow>();
     const visible = await this.filterVisible(identity, result.results);
-    return visible.map((row) => ({
+    return visible.slice(0, COLLECTION_LIMIT).map((row) => ({
       ...mapNavigation(row),
       lastViewedAt: row.last_viewed_at,
     }));
@@ -138,10 +140,10 @@ export class KnowledgeOrganizationService {
           ORDER BY state.favorited_at DESC, p.id
           LIMIT ?3`,
       )
-      .bind(identity.id, identity.workspaceId, COLLECTION_LIMIT)
+      .bind(identity.id, identity.workspaceId, CANDIDATE_LIMIT)
       .all<FavoriteRow>();
     const visible = await this.filterVisible(identity, result.results);
-    return visible.map((row) => ({
+    return visible.slice(0, COLLECTION_LIMIT).map((row) => ({
       ...mapNavigation(row),
       favoritedAt: row.favorited_at,
     }));
@@ -159,17 +161,22 @@ export class KnowledgeOrganizationService {
            LEFT JOIN pages AS parent ON parent.id = p.parent_id
           WHERE p.workspace_id = ?1 AND p.status = 'trashed'
             AND p.trashed_at IS NOT NULL
+            AND p.trashed_at >= ?2
             AND (
               parent.id IS NULL OR parent.status = 'active'
               OR parent.trash_batch_id IS NOT p.trash_batch_id
             )
           ORDER BY p.trashed_at DESC, p.id
-          LIMIT ?2`,
+          LIMIT ?3`,
       )
-      .bind(identity.workspaceId, COLLECTION_LIMIT)
+      .bind(
+        identity.workspaceId,
+        new Date(Date.now() - TRASH_RETENTION_MILLISECONDS).toISOString(),
+        CANDIDATE_LIMIT,
+      )
       .all<TrashRow>();
     const visible = await this.filterVisible(identity, result.results);
-    return visible.map((row) => ({
+    return visible.slice(0, COLLECTION_LIMIT).map((row) => ({
       ...mapNavigation(row),
       trashedAt: row.trashed_at,
       restorable: row.parent_id === null || row.parent_status === "active",

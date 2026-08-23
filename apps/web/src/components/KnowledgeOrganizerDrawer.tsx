@@ -93,10 +93,13 @@ function CollectionPanel({ api, mode, onRestored, onSelectPage }: KnowledgeOrgan
       <div className="organization-list">
         {collection.data?.map((page) => (
           <article key={page.id}>
-            <button className="organization-page-link" onClick={() => { if (mode !== "trash") onSelectPage(page.id); }} type="button">
-              <strong>{page.title}</strong>
-              <span>{formatActivityTime(page.activityAt)}</span>
-            </button>
+            {mode === "trash" ? (
+              <div className="organization-page-link"><strong>{page.title}</strong><span>{formatActivityTime(page.activityAt)}</span></div>
+            ) : (
+              <button className="organization-page-link" onClick={() => { onSelectPage(page.id); }} type="button">
+                <strong>{page.title}</strong><span>{formatActivityTime(page.activityAt)}</span>
+              </button>
+            )}
             {mode === "trash" && (
               <button
                 className="organization-action"
@@ -108,6 +111,7 @@ function CollectionPanel({ api, mode, onRestored, onSelectPage }: KnowledgeOrgan
                 {restoringId === page.id ? "復元中…" : "復元"}
               </button>
             )}
+            {mode === "trash" && page.restorable !== true && <span className="restore-blocked">先に親ページを復元</span>}
           </article>
         ))}
       </div>
@@ -173,7 +177,8 @@ function BacklinksPanel({ api, onSelectPage, pageId }: KnowledgeOrganizerDrawerP
 function MovePanel({ api, onMoved, pageId, tree }: KnowledgeOrganizerDrawerProps) {
   const items = useMemo(() => flattenTree(tree), [tree]);
   const excluded = useMemo(() => pageId === null ? new Set<string>() : subtreeIds(tree, pageId), [pageId, tree]);
-  const [parentId, setParentId] = useState<string | null>(null);
+  const currentParentId = items.find((item) => item.id === pageId)?.parentId ?? null;
+  const [parentId, setParentId] = useState<string | null>(currentParentId);
   const move = useApiMutation((destination: string | null, signal) => {
     if (pageId === null) throw new Error("ページを選択してください");
     return api.movePage(pageId, { parentId: destination }, signal);
@@ -193,7 +198,7 @@ function MovePanel({ api, onMoved, pageId, tree }: KnowledgeOrganizerDrawerProps
           {items.filter((item) => !excluded.has(item.id)).map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}
         </select>
         {move.status === "error" && <div className="drawer-error" role="alert">{move.error.message}</div>}
-        <button className="button button-primary" disabled={pageId === null || move.status === "loading"} type="submit">この場所へ移動</button>
+        <button className="button button-primary" disabled={pageId === null || parentId === currentParentId || move.status === "loading"} type="submit">この場所へ移動</button>
       </form>
     </section>
   );
@@ -209,7 +214,12 @@ function subtreeIds(nodes: PageTreeNode[], pageId: string): Set<string> {
 }
 
 function parseTagNames(value: string): string[] {
-  return [...new Set(value.split(/[,\n]/u).map((name) => name.trim()).filter(Boolean))].slice(0, 50);
+  const names = new Map<string, string>();
+  for (const name of value.split(/[,\n]/u).map((item) => item.trim()).filter(Boolean)) {
+    const normalized = name.normalize("NFKC").toLocaleLowerCase("en-US");
+    if (!names.has(normalized)) names.set(normalized, name);
+  }
+  return [...names.values()].slice(0, 50);
 }
 
 function formatActivityTime(value: string): string {

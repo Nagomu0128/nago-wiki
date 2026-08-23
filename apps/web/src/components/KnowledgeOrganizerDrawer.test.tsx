@@ -9,6 +9,7 @@ import { KnowledgeOrganizerDrawer, type KnowledgeOrganizerMode } from "./Knowled
 
 const pageId = "30000000-0000-4000-8000-000000000001";
 const parentId = "30000000-0000-4000-8000-000000000002";
+const destinationId = "30000000-0000-4000-8000-000000000003";
 const page: PageResource = {
   page: {
     id: pageId,
@@ -45,6 +46,14 @@ const tree: PageTreeNode[] = [{
     updatedAt: "2026-08-18T00:00:00.000Z",
     children: [],
   }],
+}, {
+  id: destinationId,
+  parentId: null,
+  slug: "destination",
+  title: "Destination",
+  accessMode: "workspace",
+  updatedAt: "2026-08-18T00:00:00.000Z",
+  children: [],
 }];
 
 describe("KnowledgeOrganizerDrawer", () => {
@@ -94,20 +103,20 @@ describe("KnowledgeOrganizerDrawer", () => {
   });
 
   it("provides a keyboard-operable alternative to tree dragging", async () => {
-    const moved = { ...page, page: { ...page.page, parentId } };
+    const moved = { ...page, page: { ...page.page, parentId: destinationId } };
     const movePage = vi.fn(() => Promise.resolve(moved));
     const onMoved = vi.fn();
     view = await renderDrawer("move", { movePage }, { onMoved });
     const destination = view.container.querySelector<HTMLSelectElement>("#move-parent");
     if (!destination) throw new Error("Move destination was not rendered");
     act(() => {
-      destination.value = parentId;
+      destination.value = destinationId;
       destination.dispatchEvent(new Event("change", { bubbles: true }));
       view?.container.querySelector<HTMLFormElement>("form")?.requestSubmit();
     });
     await flushUi();
 
-    expect(movePage).toHaveBeenCalledWith(pageId, { parentId }, expect.any(AbortSignal));
+    expect(movePage).toHaveBeenCalledWith(pageId, { parentId: destinationId }, expect.any(AbortSignal));
     expect(onMoved).toHaveBeenCalledWith(moved);
   });
 });

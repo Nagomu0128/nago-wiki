@@ -395,6 +395,7 @@ kbd {
 .organization-page-link span { color: var(--faint); font-size: 8.5px; }
 .organization-action { padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; color: var(--accent); background: transparent; font-size: 9px; cursor: pointer; }
 .organization-action:disabled { color: var(--faint); cursor: not-allowed; opacity: .6; }
+.restore-blocked { grid-column: 1 / -1; padding: 0 6px 7px; color: var(--danger); font-size: 8.5px; }
 .organization-form { display: grid; gap: 9px; padding-top: 18px; }
 .organization-form label { color: var(--muted); font-size: 9px; font-weight: 700; }
 .organization-form textarea, .organization-form select { width: 100%; padding: 9px; border: 1px solid var(--line); border-radius: 7px; outline: 0; color: var(--ink); background: var(--paper); font-size: 11px; }

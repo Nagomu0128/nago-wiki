@@ -196,7 +196,7 @@ export function KnowledgeEditor({
   // merging duplicate Markdown into the canonical PageRoom document.
   const readOnly = permission === "viewer" || realtimeStatus !== "connected";
   const brokenLinkTitle = wikiQuery === null ? "" : wikiLinkPageTitle(wikiQuery);
-  const canCreateWikiPage = permission !== "viewer" && brokenLinkTitle.length > 0;
+  const canCreateWikiPage = !readOnly && brokenLinkTitle.length > 0;
   const wikiOptionCount = wikiCandidates.length + (canCreateWikiPage ? 1 : 0);
 
   useEffect(() => () => { document.destroy(); }, [document]);
