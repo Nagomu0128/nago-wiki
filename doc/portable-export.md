@@ -1,8 +1,9 @@
 # Portable export validation and restore drill
 
-Owner exports contain current Markdown pages, attachment objects, page ACLs,
-tags, page-tag relationships, Wiki links, aliases, and comments. Every page and
-asset record includes its byte size and SHA-256 digest. The ZIP itself is hashed
+Owner exports contain workspace/member metadata, current Markdown pages,
+attachment objects, page ACLs, tags, page-tag relationships, Wiki links,
+aliases, and comments. Authentication identities and credentials are excluded.
+Every page and asset record includes its byte size and SHA-256 digest. The ZIP itself is hashed
 after R2 multipart completion and the digest is exposed as `archiveHash` by the
 export status API.
 
@@ -31,7 +32,7 @@ idempotent `ExportWorkflow` per active workspace and backup date, then removes
 expired R2 artifacts.
 
 - The first weekly backup in each Japanese calendar month is the monthly
-  representative and is retained for 365 days.
+  representative and is retained for 12 calendar months.
 - Other weekly backups are retained for 90 days.
 - Interactive download exports are retained for 7 days.
 - Expired jobs retain their D1/audit record as `cancelled`, while the archive,

@@ -5,96 +5,127 @@ const portablePathSchema = z.string().min(1).max(4_096).refine(isPortablePath, {
   message: "Archive paths must be normalized relative POSIX paths",
 });
 
-export const portableExportPageSchema = z.object({
-  id: z.string(),
-  parentId: z.string().nullable(),
-  slug: z.string(),
-  title: z.string(),
-  revision: z.number().int().positive(),
-  contentHash: sha256Schema,
-  accessMode: z.enum(["workspace", "restricted"]),
-  status: z.enum(["active", "trashed"]),
-  trashedAt: z.string().nullable(),
-  trashBatchId: z.string().nullable(),
-  createdBy: z.string(),
-  createdAt: z.string(),
-  updatedAt: z.string(),
-  bodyBytes: z.number().int().nonnegative(),
-  file: portablePathSchema,
-}).strict();
+export const portableExportPageSchema = z
+  .object({
+    id: z.string(),
+    parentId: z.string().nullable(),
+    slug: z.string(),
+    title: z.string(),
+    revision: z.number().int().positive(),
+    contentHash: sha256Schema,
+    accessMode: z.enum(["workspace", "restricted"]),
+    status: z.enum(["active", "trashed"]),
+    trashedAt: z.string().nullable(),
+    trashBatchId: z.string().nullable(),
+    createdBy: z.string(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+    bodyBytes: z.number().int().nonnegative(),
+    file: portablePathSchema,
+  })
+  .strict();
 export type PortableExportPage = z.infer<typeof portableExportPageSchema>;
 
-export const portableExportAssetSchema = z.object({
-  sourceKey: z.string(),
-  pageId: z.string().nullable(),
-  assetId: z.string().nullable(),
-  filename: z.string(),
-  file: portablePathSchema,
-  size: z.number().int().nonnegative(),
-  etag: z.string(),
-  uploadedAt: z.string(),
-  contentType: z.string().optional(),
-  contentDisposition: z.string().optional(),
-  customMetadata: z.record(z.string(), z.string()),
-}).strict();
+export const portableExportMemberSchema = z
+  .object({
+    id: z.string(),
+    email: z.string().min(3).max(320),
+    displayName: z.string(),
+    role: z.enum(["owner", "editor", "viewer"]),
+    status: z.enum(["active", "suspended"]),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  })
+  .strict();
+export type PortableExportMember = z.infer<typeof portableExportMemberSchema>;
+
+export const portableExportAssetSchema = z
+  .object({
+    sourceKey: z.string(),
+    pageId: z.string().nullable(),
+    assetId: z.string().nullable(),
+    filename: z.string(),
+    file: portablePathSchema,
+    size: z.number().int().nonnegative(),
+    etag: z.string(),
+    uploadedAt: z.string(),
+    contentType: z.string().optional(),
+    contentDisposition: z.string().optional(),
+    customMetadata: z.record(z.string(), z.string()),
+  })
+  .strict();
 export type PortableExportAsset = z.infer<typeof portableExportAssetSchema>;
 
-export const portableExportAclSchema = z.object({
-  pageId: z.string(),
-  userId: z.string(),
-  userEmail: z.string(),
-  permission: z.enum(["editor", "viewer"]),
-  createdAt: z.string(),
-  updatedAt: z.string(),
-}).strict();
+export const portableExportAclSchema = z
+  .object({
+    pageId: z.string(),
+    userId: z.string(),
+    userEmail: z.string(),
+    permission: z.enum(["editor", "viewer"]),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  })
+  .strict();
 export type PortableExportAcl = z.infer<typeof portableExportAclSchema>;
 
-export const portableExportTagSchema = z.object({
-  id: z.string(),
-  name: z.string(),
-  normalizedName: z.string(),
-  createdAt: z.string(),
-}).strict();
+export const portableExportTagSchema = z
+  .object({
+    id: z.string(),
+    name: z.string(),
+    normalizedName: z.string(),
+    createdAt: z.string(),
+  })
+  .strict();
 export type PortableExportTag = z.infer<typeof portableExportTagSchema>;
 
-export const portableExportPageTagSchema = z.object({
-  pageId: z.string(),
-  tagId: z.string(),
-}).strict();
+export const portableExportPageTagSchema = z
+  .object({
+    pageId: z.string(),
+    tagId: z.string(),
+  })
+  .strict();
 export type PortableExportPageTag = z.infer<typeof portableExportPageTagSchema>;
 
-export const portableExportLinkSchema = z.object({
-  sourcePageId: z.string(),
-  targetPageId: z.string().nullable(),
-  rawTarget: z.string(),
-  sourceRevision: z.number().int().positive(),
-  createdAt: z.string(),
-}).strict();
+export const portableExportLinkSchema = z
+  .object({
+    sourcePageId: z.string(),
+    targetPageId: z.string().nullable(),
+    rawTarget: z.string(),
+    sourceRevision: z.number().int().positive(),
+    createdAt: z.string(),
+  })
+  .strict();
 export type PortableExportLink = z.infer<typeof portableExportLinkSchema>;
 
-export const portableExportAliasSchema = z.object({
-  normalizedPath: z.string(),
-  pageId: z.string(),
-  createdAt: z.string(),
-}).strict();
+export const portableExportAliasSchema = z
+  .object({
+    normalizedPath: z.string(),
+    pageId: z.string(),
+    createdAt: z.string(),
+  })
+  .strict();
 export type PortableExportAlias = z.infer<typeof portableExportAliasSchema>;
 
-export const portableExportCommentSchema = z.object({
-  id: z.string(),
-  pageId: z.string(),
-  authorId: z.string(),
-  authorEmail: z.string(),
-  bodyMd: z.string(),
-  status: z.enum(["open", "resolved", "deleted"]),
-  createdAt: z.string(),
-  updatedAt: z.string(),
-}).strict();
+export const portableExportCommentSchema = z
+  .object({
+    id: z.string(),
+    pageId: z.string(),
+    authorId: z.string(),
+    authorEmail: z.string(),
+    bodyMd: z.string(),
+    status: z.enum(["open", "resolved", "deleted"]),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  })
+  .strict();
 export type PortableExportComment = z.infer<typeof portableExportCommentSchema>;
 
 export interface PortableManifestInput {
   exportId: string;
   workspaceId: string;
+  workspaceName: string;
   exportedAt: string;
+  members: PortableExportMember[];
   pages: PortableExportPage[];
   assets: PortableExportAsset[];
   acl: PortableExportAcl[];
@@ -122,13 +153,13 @@ export const portableManifestSchema = z
     version: z.literal(1),
     exportId: z.string().min(1),
     workspaceId: z.string().min(1),
+    workspaceName: z.string().min(1),
     exportedAt: z.string().min(1),
-    markdownDialect: z.literal(
-      "CommonMark with GFM extensions and wiki links",
-    ),
+    markdownDialect: z.literal("CommonMark with GFM extensions and wiki links"),
     integrityAlgorithm: z.literal("sha256"),
     counts: z
       .object({
+        members: z.number().int().nonnegative(),
         pages: z.number().int().nonnegative(),
         assets: z.number().int().nonnegative(),
         acl: z.number().int().nonnegative(),
@@ -139,6 +170,7 @@ export const portableManifestSchema = z
         comments: z.number().int().nonnegative(),
       })
       .strict(),
+    members: z.array(portableExportMemberSchema),
     pages: z.array(portableManifestPageSchema),
     assets: z.array(portableManifestAssetSchema),
     acl: z.array(portableExportAclSchema),
@@ -163,10 +195,12 @@ export function buildPortableManifest(
       version: 1,
       exportId: input.exportId,
       workspaceId: input.workspaceId,
+      workspaceName: input.workspaceName,
       exportedAt: input.exportedAt,
       markdownDialect: "CommonMark with GFM extensions and wiki links",
       integrityAlgorithm: "sha256",
       counts: {
+        members: input.members.length,
         pages: input.pages.length,
         assets: input.assets.length,
         acl: input.acl.length,
@@ -176,6 +210,7 @@ export function buildPortableManifest(
         aliases: input.aliases.length,
         comments: input.comments.length,
       },
+      members: input.members,
       pages: input.pages.map((page) => ({
         id: page.id,
         parentId: page.parentId,
@@ -247,6 +282,7 @@ function validateManifestGraph(
   manifest: Omit<PortableManifest, never>,
   context: z.RefinementCtx,
 ): void {
+  checkCount(manifest, "members", context);
   checkCount(manifest, "pages", context);
   checkCount(manifest, "assets", context);
   checkCount(manifest, "acl", context);
@@ -261,9 +297,44 @@ function validateManifestGraph(
     ["pages"],
     context,
   );
+  const memberIds = uniqueValues(
+    manifest.members.map((member) => member.id),
+    ["members"],
+    context,
+  );
+  uniqueValues(
+    manifest.members.map((member) => member.email.toLowerCase()),
+    ["members"],
+    context,
+  );
   const tagIds = uniqueValues(
     manifest.tags.map((tag) => tag.id),
     ["tags"],
+    context,
+  );
+  uniqueValues(
+    manifest.tags.map((tag) => tag.normalizedName),
+    ["tags"],
+    context,
+  );
+  uniqueValues(
+    manifest.aliases.map((alias) => alias.normalizedPath),
+    ["aliases"],
+    context,
+  );
+  uniqueValues(
+    manifest.comments.map((comment) => comment.id),
+    ["comments"],
+    context,
+  );
+  uniqueValues(
+    manifest.acl.map((entry) => `${entry.pageId}\0${entry.userId}`),
+    ["acl"],
+    context,
+  );
+  uniqueValues(
+    manifest.pageTags.map((entry) => `${entry.pageId}\0${entry.tagId}`),
+    ["pageTags"],
     context,
   );
   uniqueValues(
@@ -310,6 +381,13 @@ function validateManifestGraph(
         path: ["pages", index, "parentId"],
       });
     }
+    if (!memberIds.has(page.createdBy)) {
+      context.addIssue({
+        code: "custom",
+        message: "Page createdBy does not exist in the manifest",
+        path: ["pages", index, "createdBy"],
+      });
+    }
     const validTrashState =
       (page.status === "active" &&
         page.trashedAt === null &&
@@ -327,11 +405,42 @@ function validateManifestGraph(
   }
   checkParentCycles(manifest.pages, context);
   checkReferences(manifest.acl, "pageId", pageIds, "acl", context);
+  checkReferences(manifest.acl, "userId", memberIds, "acl", context);
   checkReferences(manifest.pageTags, "pageId", pageIds, "pageTags", context);
   checkReferences(manifest.pageTags, "tagId", tagIds, "pageTags", context);
   checkReferences(manifest.links, "sourcePageId", pageIds, "links", context);
   checkReferences(manifest.aliases, "pageId", pageIds, "aliases", context);
   checkReferences(manifest.comments, "pageId", pageIds, "comments", context);
+  checkReferences(
+    manifest.comments,
+    "authorId",
+    memberIds,
+    "comments",
+    context,
+  );
+  const memberEmails = new Map(
+    manifest.members.map((member) => [member.id, member.email.toLowerCase()]),
+  );
+  for (const [index, entry] of manifest.acl.entries()) {
+    if (memberEmails.get(entry.userId) !== entry.userEmail.toLowerCase()) {
+      context.addIssue({
+        code: "custom",
+        message: "ACL userEmail does not match its exported member",
+        path: ["acl", index, "userEmail"],
+      });
+    }
+  }
+  for (const [index, comment] of manifest.comments.entries()) {
+    if (
+      memberEmails.get(comment.authorId) !== comment.authorEmail.toLowerCase()
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "Comment authorEmail does not match its exported member",
+        path: ["comments", index, "authorEmail"],
+      });
+    }
+  }
   for (const [index, link] of manifest.links.entries()) {
     if (link.targetPageId !== null && !pageIds.has(link.targetPageId)) {
       context.addIssue({

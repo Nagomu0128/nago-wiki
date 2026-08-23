@@ -23,10 +23,7 @@ describe("portable export archive streaming", () => {
       ["stage-3", encoder.encode("mnop")],
     ]);
     const bucket = {
-      get(
-        key: string,
-        options: { range: { offset: number; length: number } },
-      ) {
+      get(key: string, options: { range: { offset: number; length: number } }) {
         const value = objects.get(key);
         if (value === undefined) return Promise.resolve(null);
         const body = value.slice(
@@ -61,81 +58,77 @@ describe("portable export archive streaming", () => {
       { key: "stage", size: 10, crc32: [], assetHashes: [] },
     ];
 
-    await expect(collect(streamStagedRange(bucket, stages, 0, 10))).rejects.toThrow(
-      "range size",
-    );
+    await expect(
+      collect(streamStagedRange(bucket, stages, 0, 10)),
+    ).rejects.toThrow("range size");
   });
 
-  it(
-    "uploads exact uniform multipart ranges from variable staged objects",
-    async () => {
-      const mebibyte = 1024 * 1024;
-      const id = crypto.randomUUID();
-      const archiveKey = `test-exports/${id}/archive.zip`;
-      const stageKeys = [
-        `test-exports/${id}/stage-1`,
-        `test-exports/${id}/stage-2`,
-      ];
-      const first = new Uint8Array(6 * mebibyte).fill(0x61);
-      const second = new Uint8Array(6 * mebibyte).fill(0x62);
-      await Promise.all([
-        env.FILES.put(stageKeys[0] ?? "", first),
-        env.FILES.put(stageKeys[1] ?? "", second),
-      ]);
-      const upload = await env.FILES.createMultipartUpload(archiveKey);
-      const plan: PlanStepResult = {
-        planKey: `test-exports/${id}/plan.json`,
-        archiveKey,
-        archiveSize: 12 * mebibyte,
-        pageCount: 0,
-        stageCount: 2,
-        partCount: 3,
-        partSize: 5 * mebibyte,
-      };
-      const stages: StagedArchivePart[] = [
-        {
-          key: stageKeys[0] ?? "",
-          size: first.byteLength,
-          crc32: [],
-          assetHashes: [],
-        },
-        {
-          key: stageKeys[1] ?? "",
-          size: second.byteLength,
-          crc32: [],
-          assetHashes: [],
-        },
-      ];
+  it("uploads exact uniform multipart ranges from variable staged objects", async () => {
+    const mebibyte = 1024 * 1024;
+    const id = crypto.randomUUID();
+    const archiveKey = `test-exports/${id}/archive.zip`;
+    const stageKeys = [
+      `test-exports/${id}/stage-1`,
+      `test-exports/${id}/stage-2`,
+    ];
+    const first = new Uint8Array(6 * mebibyte).fill(0x61);
+    const second = new Uint8Array(6 * mebibyte).fill(0x62);
+    await Promise.all([
+      env.FILES.put(stageKeys[0] ?? "", first),
+      env.FILES.put(stageKeys[1] ?? "", second),
+    ]);
+    const upload = await env.FILES.createMultipartUpload(archiveKey);
+    const plan: PlanStepResult = {
+      planKey: `test-exports/${id}/plan.json`,
+      archiveKey,
+      archiveSize: 12 * mebibyte,
+      pageCount: 0,
+      stageCount: 2,
+      partCount: 3,
+      partSize: 5 * mebibyte,
+    };
+    const stages: StagedArchivePart[] = [
+      {
+        key: stageKeys[0] ?? "",
+        size: first.byteLength,
+        crc32: [],
+        assetHashes: [],
+      },
+      {
+        key: stageKeys[1] ?? "",
+        size: second.byteLength,
+        crc32: [],
+        assetHashes: [],
+      },
+    ];
 
-      try {
-        const parts = [];
-        for (let index = 0; index < plan.partCount; index += 1) {
-          parts.push(
-            await uploadArchivePart(
-              env.FILES,
-              plan,
-              stages,
-              upload.uploadId,
-              index,
-            ),
-          );
-        }
-        const completed = await upload.complete(parts);
-        const boundary = await env.FILES.get(archiveKey, {
-          range: { offset: first.byteLength - 1, length: 2 },
-        });
-        if (boundary === null) throw new Error("Missing completed test archive");
-
-        expect(completed.size).toBe(plan.archiveSize);
-        expect(
-          Array.from(new Uint8Array(await boundary.arrayBuffer())),
-        ).toEqual([0x61, 0x62]);
-      } finally {
-        await env.FILES.delete([...stageKeys, archiveKey]);
+    try {
+      const parts = [];
+      for (let index = 0; index < plan.partCount; index += 1) {
+        parts.push(
+          await uploadArchivePart(
+            env.FILES,
+            plan,
+            stages,
+            upload.uploadId,
+            index,
+          ),
+        );
       }
-    },
-    15_000,
-  );
+      const completed = await upload.complete(parts);
+      const boundary = await env.FILES.get(archiveKey, {
+        range: { offset: first.byteLength - 1, length: 2 },
+      });
+      if (boundary === null) throw new Error("Missing completed test archive");
+
+      expect(completed.size).toBe(plan.archiveSize);
+      expect(Array.from(new Uint8Array(await boundary.arrayBuffer()))).toEqual([
+        0x61, 0x62,
+      ]);
+    } finally {
+      await env.FILES.delete([...stageKeys, archiveKey]);
+    }
+  }, 15_000);
 
   it("stages a complete restorable ZIP without buffering the R2 put", async () => {
     const id = crypto.randomUUID();
@@ -167,7 +160,19 @@ describe("portable export archive streaming", () => {
       {
         exportId: id,
         workspaceId,
+        workspaceName: "Stage",
         exportedAt,
+        members: [
+          {
+            id: ownerId,
+            email: `${id}@example.com`,
+            displayName: "Stage Owner",
+            role: "owner",
+            status: "active",
+            createdAt: exportedAt,
+            updatedAt: exportedAt,
+          },
+        ],
         pages: [page],
         assets: [],
         acl: [],
@@ -195,7 +200,19 @@ describe("portable export archive streaming", () => {
       formatVersion: 1,
       exportId: id,
       workspaceId,
+      workspaceName: "Stage",
       exportedAt,
+      members: [
+        {
+          id: ownerId,
+          email: `${id}@example.com`,
+          displayName: "Stage Owner",
+          role: "owner",
+          status: "active",
+          createdAt: exportedAt,
+          updatedAt: exportedAt,
+        },
+      ],
       pages: [page],
       assets: [],
       acl: [],

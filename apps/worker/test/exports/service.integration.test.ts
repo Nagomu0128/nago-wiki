@@ -8,7 +8,7 @@ import {
 } from "../../src/exports/service";
 import {
   exportWorkflowParamsSchema,
-  retentionDaysForExport,
+  retentionExpiresAt,
 } from "../../src/exports/workflow";
 import type { McpRuntimeEnv } from "../../src/mcp/types";
 
@@ -39,29 +39,34 @@ describe("portable export service", () => {
       workspaceId,
       requestedBy: ownerId,
     };
-    expect(retentionDaysForExport(exportWorkflowParamsSchema.parse(base))).toBe(
-      7,
-    );
     expect(
-      retentionDaysForExport(
+      retentionExpiresAt(
+        exportWorkflowParamsSchema.parse(base),
+        new Date("2026-08-02T03:00:00.000Z"),
+      ),
+    ).toBe("2026-08-09T03:00:00.000Z");
+    expect(
+      retentionExpiresAt(
         exportWorkflowParamsSchema.parse({
           ...base,
           purpose: "backup",
           backupDate: "2026-08-09",
           retentionClass: "weekly",
         }),
+        new Date("2026-08-09T03:00:00.000Z"),
       ),
-    ).toBe(90);
+    ).toBe("2026-11-07T03:00:00.000Z");
     expect(
-      retentionDaysForExport(
+      retentionExpiresAt(
         exportWorkflowParamsSchema.parse({
           ...base,
           purpose: "backup",
-          backupDate: "2026-08-02",
+          backupDate: "2027-02-07",
           retentionClass: "monthly",
         }),
+        new Date("2027-02-07T03:00:00.000Z"),
       ),
-    ).toBe(365);
+    ).toBe("2028-02-07T03:00:00.000Z");
   });
 
   it("creates only one resumable backup per workspace and date", async () => {

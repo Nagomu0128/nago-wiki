@@ -18,7 +18,28 @@ describe("portable export manifest", () => {
     const input: PortableManifestInput = {
       exportId: "export-1",
       workspaceId: "workspace-1",
+      workspaceName: "Knowledge Base",
       exportedAt: "2026-08-18T00:00:00.000Z",
+      members: [
+        {
+          id: "owner-1",
+          email: "owner@example.com",
+          displayName: "Owner",
+          role: "owner",
+          status: "active",
+          createdAt: "2026-08-17T00:00:00.000Z",
+          updatedAt: "2026-08-18T00:00:00.000Z",
+        },
+        {
+          id: "viewer-1",
+          email: "viewer@example.com",
+          displayName: "Viewer",
+          role: "viewer",
+          status: "active",
+          createdAt: "2026-08-17T00:00:00.000Z",
+          updatedAt: "2026-08-18T00:00:00.000Z",
+        },
+      ],
       pages: [
         {
           id: "page-1",
@@ -97,7 +118,9 @@ describe("portable export manifest", () => {
     ) as Record<string, unknown>;
 
     expect(manifest).toMatchObject({
-      counts: { pages: 1, assets: 1, acl: 1, links: 1 },
+      workspaceName: "Knowledge Base",
+      counts: { members: 2, pages: 1, assets: 1, acl: 1, links: 1 },
+      members: input.members,
       pages: [
         {
           id: "page-1",
@@ -123,7 +146,19 @@ describe("portable export manifest", () => {
     const input: PortableManifestInput = {
       exportId: "restore-export",
       workspaceId: "source-workspace",
+      workspaceName: "Source Workspace",
       exportedAt: "2026-08-18T00:00:00.000Z",
+      members: [
+        {
+          id: "owner",
+          email: "owner@example.com",
+          displayName: "Owner",
+          role: "owner",
+          status: "active",
+          createdAt: "2026-08-18T00:00:00.000Z",
+          updatedAt: "2026-08-18T00:00:00.000Z",
+        },
+      ],
       pages: [
         {
           id: "home",
@@ -234,7 +269,19 @@ describe("portable export manifest", () => {
         {
           exportId: "invalid-export",
           workspaceId: "workspace",
+          workspaceName: "Workspace",
           exportedAt: "2026-08-18T00:00:00.000Z",
+          members: [
+            {
+              id: "owner",
+              email: "owner@example.com",
+              displayName: "Owner",
+              role: "owner",
+              status: "active",
+              createdAt: "2026-08-18T00:00:00.000Z",
+              updatedAt: "2026-08-18T00:00:00.000Z",
+            },
+          ],
           pages: [
             {
               id: "page",

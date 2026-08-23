@@ -19,7 +19,9 @@ void test("validates a restorable portable export archive", async (context) => {
     {
       exportId: "export-test",
       workspaceId: "workspace-test",
+      workspaceName: "Test Workspace",
       exportedAt: "2026-08-23T00:00:00.000Z",
+      members: [testOwner("2026-08-23T00:00:00.000Z")],
       pages: [
         {
           id: "home",
@@ -74,7 +76,9 @@ void test("rejects a page whose SHA-256 does not match", async (context) => {
     {
       exportId: "export-tampered",
       workspaceId: "workspace-test",
+      workspaceName: "Test Workspace",
       exportedAt: "2026-08-23T00:00:00.000Z",
+      members: [testOwner("2026-08-23T00:00:00.000Z")],
       pages: [
         {
           id: "home",
@@ -118,4 +122,16 @@ void test("rejects a page whose SHA-256 does not match", async (context) => {
 
 function sha256Hex(value: Uint8Array): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function testOwner(timestamp: string) {
+  return {
+    id: "owner",
+    email: "owner@example.com",
+    displayName: "Owner",
+    role: "owner" as const,
+    status: "active" as const,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
 }
