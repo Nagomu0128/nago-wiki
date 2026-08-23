@@ -209,10 +209,11 @@
     {
       "name": "nago-wiki-export-dev",
       "binding": "EXPORT_WORKFLOW",
-      "class_name": "ExportWorkflow"
+      "class_name": "ExportWorkflow",
+      "limits": { "steps": 25000 }
     }
   ],
   "triggers": {
-    "crons": ["*/1 * * * *"]
+    "crons": ["*/1 * * * *", "0 18 * * 6"]
   }
 }
