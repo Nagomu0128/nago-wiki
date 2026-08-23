@@ -3,6 +3,7 @@ import type { MiddlewareHandler } from "hono";
 
 import { createAiRoutes } from "./ai/routes";
 import { createAccessAuthenticationMiddleware } from "./auth/access";
+import { accessProtectedApiPaths } from "./auth/protected-api-paths";
 import { createBotRoutes } from "./bots/routes";
 import { DiscordGatewayContainer } from "./bots/discord-container";
 import { AuthorizationService, canEdit, canView } from "./core/authorization";
@@ -48,20 +49,7 @@ const exposeIdentity: MiddlewareHandler<CoreHonoEnv> = async (context, next) => 
   await next();
 };
 
-for (const path of [
-  "/api/v1/tree",
-  "/api/v1/tags",
-  "/api/v1/me",
-  "/api/v1/pages",
-  "/api/v1/pages/*",
-  "/api/v1/search",
-  "/api/v1/answer",
-  "/api/v1/imports",
-  "/api/v1/imports/:id",
-  "/api/v1/imports/:id/apply",
-  "/api/v1/imports/google/authorize",
-  "/api/v1/account-links",
-]) {
+for (const path of accessProtectedApiPaths) {
   app.use(path, accessAuthentication, exposeIdentity);
 }
 

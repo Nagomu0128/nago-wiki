@@ -1,0 +1,15 @@
+export const accessProtectedApiPaths = [
+  "/api/v1/tree",
+  "/api/v1/tags",
+  "/api/v1/me",
+  "/api/v1/pages",
+  "/api/v1/pages/*",
+  "/api/v1/search",
+  "/api/v1/answer",
+  "/api/v1/imports",
+  "/api/v1/imports/:id",
+  "/api/v1/imports/:id/apply",
+  "/api/v1/imports/google/authorize",
+  "/api/v1/imports/google/picker-config",
+  "/api/v1/account-links",
+] as const;
