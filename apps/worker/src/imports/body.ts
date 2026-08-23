@@ -19,15 +19,15 @@ export async function readBoundedImportJson(
   const chunks: string[] = [];
   let byteLength = 0;
   try {
-    while (true) {
-      const result = await reader.read();
-      if (result.done) break;
+    let result = await reader.read();
+    while (!result.done) {
       byteLength += result.value.byteLength;
       if (byteLength > maxBytes) {
-        await reader.cancel("Import request is too large");
+        await reader.cancel("Import request is too large").catch(() => undefined);
         throw tooLarge();
       }
       chunks.push(decoder.decode(result.value, { stream: true }));
+      result = await reader.read();
     }
     chunks.push(decoder.decode());
   } catch (error) {

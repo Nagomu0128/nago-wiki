@@ -19,6 +19,9 @@ CREATE INDEX exports_workspace_created_idx
   ON exports(workspace_id, created_at DESC);
 CREATE INDEX exports_status_updated_idx ON exports(status, updated_at);
 
+ALTER TABLE imports ADD COLUMN workflow_source_json TEXT
+  CHECK (workflow_source_json IS NULL OR json_valid(workflow_source_json));
+
 CREATE TABLE import_request_idempotency (
   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   key_hash TEXT NOT NULL CHECK (length(key_hash) = 64),

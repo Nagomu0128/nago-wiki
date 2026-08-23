@@ -43,7 +43,11 @@ describe("POST /imports idempotency", () => {
   });
 
   it("replays the existing job and rejects a mismatched payload", async () => {
-    const createWorkflow = vi.fn(async () => ({ id: "workflow" }));
+    const createWorkflow = vi.fn(() => Promise.resolve({ id: "workflow" }));
+    const workflowStatus = vi.fn(() => Promise.resolve({ status: "running" }));
+    const getWorkflow = vi.fn(() =>
+      Promise.resolve({ status: workflowStatus, restart: vi.fn() }),
+    );
     const application = new Hono<{
       Bindings: McpRuntimeEnv;
       Variables: { identity: AuthenticatedIdentity };
@@ -55,7 +59,7 @@ describe("POST /imports idempotency", () => {
     application.route("/", createImportRoutes());
     const testEnvironment = {
       ...env,
-      IMPORT_WORKFLOW: { create: createWorkflow },
+      IMPORT_WORKFLOW: { create: createWorkflow, get: getWorkflow },
     } as unknown as McpRuntimeEnv;
 
     const create = (content: string) =>
@@ -84,11 +88,52 @@ describe("POST /imports idempotency", () => {
     });
     expect(conflict.status).toBe(409);
     expect(createWorkflow).toHaveBeenCalledTimes(1);
+    expect(getWorkflow).toHaveBeenCalledTimes(1);
     expect(
       await env.DB.prepare("SELECT COUNT(*) AS count FROM imports").first<{
         count: number;
       }>(),
     ).toEqual({ count: 1 });
+  });
+
+  it("starts a missing workflow when an idempotent request is replayed", async () => {
+    const createWorkflow = vi.fn(() => Promise.resolve({ id: "workflow" }));
+    const workflowStatus = vi.fn(() => Promise.resolve({ status: "unknown" }));
+    const application = new Hono<{
+      Bindings: McpRuntimeEnv;
+      Variables: { identity: AuthenticatedIdentity };
+    }>();
+    application.use("*", async (context, next) => {
+      context.set("identity", identity);
+      await next();
+    });
+    application.route("/", createImportRoutes());
+    const testEnvironment = {
+      ...env,
+      IMPORT_WORKFLOW: {
+        create: createWorkflow,
+        get: vi.fn(() =>
+          Promise.resolve({ status: workflowStatus, restart: vi.fn() }),
+        ),
+      },
+    } as unknown as McpRuntimeEnv;
+    const request = () =>
+      application.request(
+        "https://wiki.example/imports",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Idempotency-Key": "recover-import-workflow",
+          },
+          body: JSON.stringify({ sourceType: "paste", content: "memo" }),
+        },
+        testEnvironment,
+      );
+
+    expect((await request()).status).toBe(202);
+    expect((await request()).status).toBe(200);
+    expect(createWorkflow).toHaveBeenCalledTimes(2);
   });
 
   it("requires a bounded Idempotency-Key", async () => {
@@ -109,7 +154,7 @@ describe("POST /imports idempotency", () => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ sourceType: "paste", content: "memo" }),
       },
-      { ...env } as unknown as McpRuntimeEnv,
+      env,
     );
 
     expect(response.status).toBe(400);

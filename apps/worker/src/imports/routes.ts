@@ -12,6 +12,7 @@ import { z } from "zod";
 import { readBoundedImportJson } from "./body";
 import {
   createImportSchema,
+  importWorkflowSourceSchema,
   type CreateImportRequest,
   type ImportWorkflowSource,
 } from "./contracts";
@@ -45,6 +46,7 @@ interface ImportRow {
   user_id: string;
   source_type: string;
   source_metadata_json: string;
+  workflow_source_json: string | null;
   status: string;
   report_r2_key: string | null;
   created_at: string;
@@ -197,14 +199,15 @@ export function createImportRoutes(): Hono<ImportApi> {
         context.env.DB.prepare(
           `INSERT INTO imports (
                id, workspace_id, user_id, source_type, source_metadata_json,
-               status, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6, ?6)`,
+               workflow_source_json, status, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'queued', ?7, ?7)`,
         ).bind(
           importId,
           identity.workspaceId,
           userId,
           databaseSourceType(request.sourceType),
           JSON.stringify(prepared.metadata),
+          JSON.stringify(prepared.workflowSource),
           now,
         ),
         context.env.DB.prepare(
@@ -236,17 +239,11 @@ export function createImportRoutes(): Hono<ImportApi> {
       source: prepared.workflowSource,
     };
     try {
-      await context.env.IMPORT_WORKFLOW.create({
-        id: `import-${importId}`,
-        params: parameters,
-        retention: { successRetention: "7 days", errorRetention: "30 days" },
-      });
+      await createImportWorkflow(context.env.IMPORT_WORKFLOW, parameters);
     } catch (error) {
-      await context.env.DB.prepare(
-        `UPDATE imports SET status = 'failed', updated_at = ?2 WHERE id = ?1`,
-      )
-        .bind(importId, new Date().toISOString())
-        .run();
+      // Keep the durable intent queued. A retry with the same idempotency key
+      // can distinguish an existing instance from an instance that was never
+      // created, even when the original create response was lost.
       throw error;
     }
     return context.json(
@@ -272,7 +269,8 @@ export function createImportRoutes(): Hono<ImportApi> {
     );
     const value = await context.env.DB.prepare(
       `SELECT id, workspace_id, user_id, source_type, source_metadata_json,
-              status, report_r2_key, created_at, updated_at, expires_at
+              workflow_source_json, status, report_r2_key,
+              created_at, updated_at, expires_at
          FROM imports WHERE id = ?1`,
     )
       .bind(context.req.param("id"))
@@ -301,7 +299,8 @@ export function createImportRoutes(): Hono<ImportApi> {
       const importId = context.req.param("id");
       const value = await context.env.DB.prepare(
         `SELECT id, workspace_id, user_id, source_type, source_metadata_json,
-                status, report_r2_key, created_at, updated_at, expires_at
+                workflow_source_json, status, report_r2_key,
+                created_at, updated_at, expires_at
            FROM imports WHERE id = ?1`,
       )
         .bind(importId)
@@ -429,18 +428,19 @@ async function replayImport(
   const identity = requireImportIdentity(context.get("identity"));
   const row = await context.env.DB.prepare(
     `SELECT id, workspace_id, user_id, source_type, source_metadata_json,
-            status, report_r2_key, created_at, updated_at, expires_at
+            workflow_source_json, status, report_r2_key,
+            created_at, updated_at, expires_at
        FROM imports WHERE id = ?1`,
   )
     .bind(idempotency.import_id)
     .first<ImportRow>();
   if (
-    row === null ||
-    row.user_id !== identity.id ||
+    row?.user_id !== identity.id ||
     row.workspace_id !== identity.workspaceId
   ) {
     throw importIdempotencyConflict();
   }
+  await resumeImportWorkflow(context.env, row);
   const metadata = z
     .record(z.string(), z.unknown())
     .catch({})
@@ -449,6 +449,54 @@ async function replayImport(
     await importJobResponse(context.env.FILES, row, metadata),
     200,
   );
+}
+
+async function createImportWorkflow(
+  workflow: Workflow<ImportWorkflowParams>,
+  parameters: ImportWorkflowParams,
+): Promise<void> {
+  await workflow.create({
+    id: `import-${parameters.importId}`,
+    params: parameters,
+    retention: { successRetention: "7 days", errorRetention: "30 days" },
+  });
+}
+
+async function resumeImportWorkflow(
+  environment: McpRuntimeEnv,
+  row: ImportRow,
+): Promise<void> {
+  if (row.status !== "queued" && row.status !== "running") return;
+  const source = importWorkflowSourceSchema.safeParse(
+    parseJson(row.workflow_source_json),
+  );
+  if (!source.success) {
+    throw new HTTPException(409, {
+      message: "Import workflow cannot be resumed",
+    });
+  }
+  const parameters: ImportWorkflowParams = {
+    importId: row.id,
+    workspaceId: row.workspace_id,
+    requestedBy: row.user_id,
+    source: source.data,
+  };
+  const instance = await environment.IMPORT_WORKFLOW.get(`import-${row.id}`);
+  const state = await instance.status();
+  if (state.status === "unknown") {
+    try {
+      await createImportWorkflow(environment.IMPORT_WORKFLOW, parameters);
+    } catch (error) {
+      const raced = await (
+        await environment.IMPORT_WORKFLOW.get(`import-${row.id}`)
+      ).status();
+      if (raced.status === "unknown") throw error;
+    }
+    return;
+  }
+  if (state.status === "errored" || state.status === "terminated") {
+    await instance.restart();
+  }
 }
 
 function requireImportIdempotencyKey(value: string | undefined): string {
