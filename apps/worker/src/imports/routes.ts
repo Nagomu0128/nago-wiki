@@ -60,6 +60,13 @@ interface ImportIdempotencyRow {
   expires_at: string;
 }
 
+interface ExpiredImportRow {
+  id: string;
+  workspace_id: string;
+}
+
+const MAX_CLEANUP_IMPORTS_PER_RUN = 2_000;
+
 const googleStateSchema = z.object({
   userId: z.string(),
   expectedEmail: z.email(),
@@ -224,11 +231,17 @@ export function createImportRoutes(): Hono<ImportApi> {
         ),
       ]);
     } catch (error) {
-      await deletePreparedSource(context.env.FILES, prepared.workflowSource);
       const raced = await getImportIdempotency(context.env.DB, userId, keyHash);
       if (raced !== null && raced.expires_at > now) {
+        if (raced.import_id !== importId) {
+          await deletePreparedSource(
+            context.env.FILES,
+            prepared.workflowSource,
+          );
+        }
         return replayImport(context, raced, requestHash);
       }
+      await deletePreparedSource(context.env.FILES, prepared.workflowSource);
       throw error;
     }
 
@@ -241,7 +254,14 @@ export function createImportRoutes(): Hono<ImportApi> {
     // Keep the durable intent queued when creation fails. A retry with the same
     // idempotency key can distinguish an existing instance from an instance
     // that was never created, even when the original create response was lost.
-    await createImportWorkflow(context.env.IMPORT_WORKFLOW, parameters);
+    await createImportWorkflow(context.env.IMPORT_WORKFLOW, parameters).catch(
+      (error: unknown) => {
+        console.error("Deferred import Workflow creation", {
+          importId,
+          error: error instanceof Error ? error.message : "Unknown error",
+        });
+      },
+    );
     return context.json(
       {
         id: importId,
@@ -493,6 +513,110 @@ async function resumeImportWorkflow(
   if (state.status === "errored" || state.status === "terminated") {
     await instance.restart();
   }
+}
+
+export async function reconcileQueuedImports(
+  environment: McpRuntimeEnv,
+  now = new Date(),
+): Promise<{ resumed: number; failed: number }> {
+  const cutoff = new Date(now.getTime() - 5 * 60_000).toISOString();
+  const rows = await environment.DB.prepare(
+    `SELECT id, workspace_id, user_id, source_type, source_metadata_json,
+            workflow_source_json, status, report_r2_key,
+            created_at, updated_at, expires_at
+       FROM imports
+      WHERE status IN ('queued', 'running') AND updated_at <= ?1
+      ORDER BY updated_at, id
+      LIMIT 100`,
+  )
+    .bind(cutoff)
+    .all<ImportRow>();
+  let resumed = 0;
+  let failed = 0;
+  for (const row of rows.results) {
+    if (
+      !importWorkflowSourceSchema.safeParse(parseJson(row.workflow_source_json))
+        .success
+    ) {
+      const failedAt = now.toISOString();
+      await environment.DB.prepare(
+        `UPDATE imports
+            SET status = 'failed',
+                source_metadata_json = json_set(
+                  source_metadata_json,
+                  '$.error',
+                  'Import workflow cannot be resumed after migration'
+                ),
+                updated_at = ?2, expires_at = ?3
+          WHERE id = ?1 AND status = 'queued'`,
+      )
+        .bind(
+          row.id,
+          failedAt,
+          new Date(now.getTime() + 7 * 24 * 60 * 60 * 1_000).toISOString(),
+        )
+        .run();
+      failed += 1;
+      continue;
+    }
+    try {
+      await resumeImportWorkflow(environment, row);
+      resumed += 1;
+    } catch (error) {
+      failed += 1;
+      console.error("Failed to reconcile queued import", {
+        importId: row.id,
+        error: error instanceof Error ? error.message : "Unknown error",
+      });
+    }
+  }
+  return { resumed, failed };
+}
+
+export async function cleanupExpiredImports(
+  environment: Pick<McpRuntimeEnv, "DB" | "FILES">,
+  now = new Date().toISOString(),
+): Promise<number> {
+  let cleaned = 0;
+  while (cleaned < MAX_CLEANUP_IMPORTS_PER_RUN) {
+    const limit = Math.min(100, MAX_CLEANUP_IMPORTS_PER_RUN - cleaned);
+    const rows = await environment.DB.prepare(
+      `SELECT id, workspace_id FROM imports
+        WHERE expires_at IS NOT NULL AND expires_at <= ?1
+        ORDER BY expires_at, id
+        LIMIT ?2`,
+    )
+      .bind(now, limit)
+      .all<ExpiredImportRow>();
+    if (rows.results.length === 0) break;
+    for (const row of rows.results) {
+      await deleteImportPrefix(
+        environment.FILES,
+        `imports/${row.workspace_id}/${row.id}/`,
+      );
+      await environment.DB.prepare(
+        "DELETE FROM imports WHERE id = ?1 AND expires_at IS NOT NULL AND expires_at <= ?2",
+      )
+        .bind(row.id, now)
+        .run();
+      cleaned += 1;
+    }
+    if (rows.results.length < limit) break;
+  }
+  return cleaned;
+}
+
+async function deleteImportPrefix(
+  bucket: R2Bucket,
+  prefix: string,
+): Promise<void> {
+  let listing: R2Objects;
+  do {
+    listing = await bucket.list({ prefix, limit: 1_000 });
+    if (listing.objects.length > 0) {
+      await bucket.delete(listing.objects.map((object) => object.key));
+    }
+  } while (listing.truncated || listing.objects.length > 0);
 }
 
 function requireImportIdempotencyKey(value: string | undefined): string {

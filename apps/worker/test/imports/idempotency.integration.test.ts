@@ -3,7 +3,11 @@ import { env } from "cloudflare:workers";
 import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { createImportRoutes } from "../../src/imports/routes";
+import {
+  createImportRoutes,
+  reconcileQueuedImports,
+} from "../../src/imports/routes";
+import type { ImportWorkflowParams } from "../../src/imports/workflow";
 import type { McpRuntimeEnv } from "../../src/mcp/types";
 
 const identity: AuthenticatedIdentity = {
@@ -43,7 +47,9 @@ describe("POST /imports idempotency", () => {
   });
 
   it("replays the existing job and rejects a mismatched payload", async () => {
-    const createWorkflow = vi.fn(() => Promise.resolve({ id: "workflow" }));
+    const createWorkflow = vi.fn((options: { params: ImportWorkflowParams }) =>
+      Promise.resolve({ id: options.params.importId }),
+    );
     const workflowStatus = vi.fn(() => Promise.resolve({ status: "running" }));
     const getWorkflow = vi.fn(() =>
       Promise.resolve({ status: workflowStatus, restart: vi.fn() }),
@@ -158,5 +164,130 @@ describe("POST /imports idempotency", () => {
     );
 
     expect(response.status).toBe(400);
+  });
+
+  it("reconciles a durable import intent after Workflow creation fails", async () => {
+    const createWorkflow = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("workflow unavailable"))
+      .mockResolvedValueOnce({ id: "workflow" });
+    const application = new Hono<{
+      Bindings: McpRuntimeEnv;
+      Variables: { identity: AuthenticatedIdentity };
+    }>();
+    application.use("*", async (context, next) => {
+      context.set("identity", identity);
+      await next();
+    });
+    application.route("/", createImportRoutes());
+    const testEnvironment = {
+      ...env,
+      IMPORT_WORKFLOW: {
+        create: createWorkflow,
+        get: vi.fn(() =>
+          Promise.resolve({
+            status: () => Promise.resolve({ status: "unknown" }),
+            restart: vi.fn(),
+          }),
+        ),
+      },
+    } as unknown as McpRuntimeEnv;
+
+    const response = await application.request(
+      "https://wiki.example/imports",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": "deferred-workflow",
+        },
+        body: JSON.stringify({ sourceType: "paste", content: "memo" }),
+      },
+      testEnvironment,
+    );
+    await env.DB.prepare(
+      "UPDATE imports SET updated_at = '2026-08-23T00:00:00.000Z'",
+    ).run();
+    await env.DB.prepare(
+      `INSERT INTO imports (
+         id, workspace_id, user_id, source_type, source_metadata_json,
+         workflow_source_json, status, created_at, updated_at
+       ) VALUES (
+         'legacy-queued-import', ?1, ?2, 'paste', '{}', NULL, 'queued', ?3, ?3
+       )`,
+    )
+      .bind(identity.workspaceId, identity.id, "2026-08-23T00:00:00.000Z")
+      .run();
+
+    const result = await reconcileQueuedImports(
+      testEnvironment,
+      new Date("2026-08-23T00:10:00.000Z"),
+    );
+
+    expect(response.status).toBe(202);
+    expect(result).toEqual({ resumed: 1, failed: 1 });
+    expect(createWorkflow).toHaveBeenCalledTimes(2);
+    const legacyRow = await env.DB.prepare(
+      "SELECT status, expires_at FROM imports WHERE id = 'legacy-queued-import'",
+    ).first<{ status: string; expires_at: string | null }>();
+    expect(legacyRow?.status).toBe("failed");
+    expect(legacyRow?.expires_at).toEqual(expect.any(String));
+  });
+
+  it("preserves the winning R2 source when a committed D1 batch response is lost", async () => {
+    const application = new Hono<{
+      Bindings: McpRuntimeEnv;
+      Variables: { identity: AuthenticatedIdentity };
+    }>();
+    application.use("*", async (context, next) => {
+      context.set("identity", identity);
+      await next();
+    });
+    application.route("/", createImportRoutes());
+    const createWorkflow = vi.fn((options: { params: ImportWorkflowParams }) =>
+      Promise.resolve({ id: options.params.importId }),
+    );
+    const database = {
+      prepare: env.DB.prepare.bind(env.DB),
+      batch: async (statements: D1PreparedStatement[]) => {
+        await env.DB.batch(statements);
+        throw new Error("D1 response lost after commit");
+      },
+    } as unknown as D1Database;
+    const testEnvironment = {
+      ...env,
+      DB: database,
+      IMPORT_WORKFLOW: {
+        create: createWorkflow,
+        get: vi.fn(() =>
+          Promise.resolve({
+            status: () => Promise.resolve({ status: "unknown" }),
+            restart: vi.fn(),
+          }),
+        ),
+      },
+    } as unknown as McpRuntimeEnv;
+
+    const response = await application.request(
+      "https://wiki.example/imports",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": "lost-d1-response",
+        },
+        body: JSON.stringify({ sourceType: "paste", content: "keep me" }),
+      },
+      testEnvironment,
+    );
+    const parameters = createWorkflow.mock.calls[0]?.[0]?.params;
+    const sourceKey =
+      parameters?.source.sourceType === "paste"
+        ? parameters.source.sourceKey
+        : undefined;
+
+    expect(response.status).toBe(200);
+    expect(sourceKey).toBeDefined();
+    expect(await env.FILES.head(sourceKey ?? "")).not.toBeNull();
   });
 });

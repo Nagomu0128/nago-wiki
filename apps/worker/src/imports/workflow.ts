@@ -75,7 +75,10 @@ export class ImportWorkflow extends WorkflowEntrypoint<
           throw new Error("Stored import source is unavailable or too large");
         }
         const conversion = await convertSource(this.env.AI, object, source);
-        if (new TextEncoder().encode(conversion.markdown).byteLength > MAX_PREVIEW_BYTES) {
+        if (
+          new TextEncoder().encode(conversion.markdown).byteLength >
+          MAX_PREVIEW_BYTES
+        ) {
           throw new Error("Converted Markdown exceeds the 1 MiB page limit");
         }
         const previewKey = `imports/${parameters.workspaceId}/${parameters.importId}/preview.md`;
@@ -93,7 +96,9 @@ export class ImportWorkflow extends WorkflowEntrypoint<
               warnings: conversion.warnings,
               ...conversion.details,
             }),
-            { httpMetadata: { contentType: "application/json; charset=utf-8" } },
+            {
+              httpMetadata: { contentType: "application/json; charset=utf-8" },
+            },
           ),
         ]);
         return {
@@ -141,17 +146,21 @@ export class ImportWorkflow extends WorkflowEntrypoint<
       return preview;
     } catch (error) {
       await step.do("mark import failed", async () => {
+        const failedAt = new Date();
         await this.env.DB.prepare(
           `UPDATE imports
               SET status = 'failed',
                   source_metadata_json = json_set(source_metadata_json, '$.error', ?2),
-                  updated_at = ?3
+                  updated_at = ?3, expires_at = ?4
             WHERE id = ?1`,
         )
           .bind(
             parameters.importId,
             publicErrorMessage(error),
-            new Date().toISOString(),
+            failedAt.toISOString(),
+            new Date(
+              failedAt.getTime() + 7 * 24 * 60 * 60 * 1_000,
+            ).toISOString(),
           )
           .run();
         return { status: "failed" as const };
@@ -213,7 +222,11 @@ async function materializeSource(
       resolvedSourceUrl: fetched.finalUrl,
     };
   }
-  if (!source.sourceKey.startsWith(`imports/${parameters.workspaceId}/${parameters.importId}/`)) {
+  if (
+    !source.sourceKey.startsWith(
+      `imports/${parameters.workspaceId}/${parameters.importId}/`,
+    )
+  ) {
     throw new Error("Stored import source key does not belong to this import");
   }
   const object = await environment.FILES.head(source.sourceKey);
@@ -244,7 +257,10 @@ async function convertSource(
       details: { inlineObjectIds: conversion.inlineObjectIds },
     };
   }
-  const normalizedType = source.contentType.split(";", 1)[0]?.trim().toLowerCase();
+  const normalizedType = source.contentType
+    .split(";", 1)[0]
+    ?.trim()
+    .toLowerCase();
   if (normalizedType === "text/markdown" || normalizedType === "text/plain") {
     return {
       markdown: await object.text(),
@@ -275,18 +291,28 @@ async function convertSource(
 }
 
 function documentTitle(document: unknown): string {
-  if (typeof document !== "object" || document === null || !("title" in document)) {
+  if (
+    typeof document !== "object" ||
+    document === null ||
+    !("title" in document)
+  ) {
     return "Imported Google Document";
   }
-  return typeof document.title === "string" ? document.title : "Imported Google Document";
+  return typeof document.title === "string"
+    ? document.title
+    : "Imported Google Document";
 }
 
 function titleFromFilename(filename: string): string {
   const withoutExtension = filename.replace(/\.[^.]+$/u, "").trim();
-  return withoutExtension.length > 0 ? withoutExtension.slice(0, 500) : "Imported Document";
+  return withoutExtension.length > 0
+    ? withoutExtension.slice(0, 500)
+    : "Imported Document";
 }
 
 function publicErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : "Import failed";
-  return message.replace(/Bearer\s+\S+/giu, "Bearer [redacted]").slice(0, 1_000);
+  return message
+    .replace(/Bearer\s+\S+/giu, "Bearer [redacted]")
+    .slice(0, 1_000);
 }
