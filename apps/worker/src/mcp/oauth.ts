@@ -6,6 +6,7 @@ import {
 import { WorkerEntrypoint } from "cloudflare:workers";
 import { z } from "zod";
 
+import { recordAuditEvent } from "../core/audit-events";
 import { McpApiHandler } from "./handler";
 import { escapeHtml } from "./security";
 import type { McpAuthProps, McpRuntimeEnv } from "./types";
@@ -200,6 +201,12 @@ export class McpAuthorizationHandler extends WorkerEntrypoint<McpRuntimeEnv> {
       scope: grantedScopes,
       props,
     });
+    await recordMcpOAuthGrantAudit(this.env.DB, {
+      memberId: member.id,
+      clientId: pending.data.request.clientId,
+      clientName: pending.data.clientName,
+      scopes: grantedScopes,
+    });
     return new Response(null, {
       status: 302,
       headers: {
@@ -208,6 +215,28 @@ export class McpAuthorizationHandler extends WorkerEntrypoint<McpRuntimeEnv> {
       },
     });
   }
+}
+
+export async function recordMcpOAuthGrantAudit(
+  database: D1Database,
+  grant: {
+    memberId: string;
+    clientId: string;
+    clientName: string;
+    scopes: string[];
+  },
+): Promise<void> {
+  await recordAuditEvent(database, {
+    actorId: grant.memberId,
+    action: "mcp.oauth.granted",
+    targetType: "user",
+    targetId: grant.memberId,
+    metadata: {
+      clientId: truncate(grant.clientId, 512),
+      clientName: truncate(grant.clientName, 200),
+      scopes: grant.scopes.filter((scope) => scope === "wiki:read"),
+    },
+  });
 }
 
 export function createMcpOAuthProvider(environment: McpRuntimeEnv): OAuthProvider<McpRuntimeEnv> {
@@ -373,4 +402,8 @@ async function sha256(value: string): Promise<string> {
   return [...new Uint8Array(digest)]
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("");
+}
+
+function truncate(value: string, maximumLength: number): string {
+  return value.length <= maximumLength ? value : value.slice(0, maximumLength);
 }

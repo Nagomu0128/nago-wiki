@@ -1,4 +1,5 @@
 import type { McpRuntimeEnv } from "../mcp/types";
+import { createUuidV7 } from "../core/ids";
 
 interface LinkCodeRow {
   id: string;
@@ -62,6 +63,7 @@ export async function consumeAccountLinkCode(
   if (existing !== null && existing.user_id !== linkCode.user_id) return false;
 
   const marker = `${new Date().toISOString()}#${crypto.randomUUID()}`;
+  const linkedAt = new Date().toISOString();
   await database.batch([
     database
       .prepare(
@@ -71,13 +73,35 @@ export async function consumeAccountLinkCode(
       .bind(linkCode.id, marker),
     database
       .prepare(
+        `INSERT INTO audit_events
+           (id, actor_id, action, target_type, target_id, metadata_json, created_at)
+         SELECT ?1, user_id, 'bot_identity.linked', 'user', user_id, ?2, ?3
+           FROM account_link_codes
+          WHERE id = ?4 AND consumed_at = ?5
+            AND NOT EXISTS (
+              SELECT 1
+                FROM external_identities
+               WHERE provider = ?6 AND external_subject = ?7
+            )`,
+      )
+      .bind(
+        createUuidV7(),
+        JSON.stringify({ provider }),
+        linkedAt,
+        linkCode.id,
+        marker,
+        provider,
+        externalSubject,
+      ),
+    database
+      .prepare(
         `INSERT OR IGNORE INTO external_identities
            (provider, external_subject, user_id, linked_at)
          SELECT ?1, ?2, user_id, ?3
            FROM account_link_codes
           WHERE id = ?4 AND consumed_at = ?5`,
       )
-      .bind(provider, externalSubject, new Date().toISOString(), linkCode.id, marker),
+      .bind(provider, externalSubject, linkedAt, linkCode.id, marker),
   ]);
   const linked = await database
     .prepare(
