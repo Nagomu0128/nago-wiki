@@ -174,7 +174,7 @@ function parseShardId(value: string): number {
 
 function requireUserId(contextUserId: string | undefined): string {
   if (contextUserId === undefined || contextUserId.length === 0) {
-    throw new ApiProblem("AUTHENTICATION_REQUIRED", 401, "Authentication is required");
+    throw new HTTPException(401, { message: "Authentication required" });
   }
   return contextUserId;
 }

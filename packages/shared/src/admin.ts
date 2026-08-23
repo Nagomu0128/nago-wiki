@@ -5,6 +5,13 @@ import { userStatusSchema, workspaceRoleSchema } from "./auth";
 export const botProviderSchema = z.enum(["discord", "line"]);
 export type BotProvider = z.infer<typeof botProviderSchema>;
 
+export const externalBotChannelIdSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(256)
+  .regex(/^[A-Za-z0-9._:-]+$/u, "Unsupported channel id");
+
 export const adminMemberSchema = z.object({
   id: z.uuid(),
   email: z.email(),
@@ -71,7 +78,7 @@ export type ReplacePageAclRequest = z.infer<
 
 export const botChannelSchema = z.object({
   provider: botProviderSchema,
-  externalChannelId: z.string().trim().min(1).max(256),
+  externalChannelId: externalBotChannelIdSchema,
   displayName: z.string().trim().min(1).max(200).nullable(),
   enabled: z.boolean(),
   createdAt: z.iso.datetime(),
@@ -98,7 +105,7 @@ export type UpdateBotProviderRequest = z.infer<
 
 export const createBotChannelRequestSchema = z.object({
   provider: botProviderSchema,
-  externalChannelId: z.string().trim().min(1).max(256),
+  externalChannelId: externalBotChannelIdSchema,
   displayName: z.string().trim().min(1).max(200).nullable().optional().default(null),
   enabled: z.boolean().optional().default(true),
 });

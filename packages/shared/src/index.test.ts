@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   createPageRequestSchema,
+  externalBotChannelIdSchema,
   replacePageAclRequestSchema,
   healthResponseSchema,
   normalizeWikiPath,
@@ -53,5 +54,12 @@ describe("shared contracts", () => {
         ],
       }),
     ).toThrow();
+  });
+
+  it("keeps bot channel ids safe for route segments", () => {
+    expect(externalBotChannelIdSchema.parse("discord:team_channel-123")).toBe(
+      "discord:team_channel-123",
+    );
+    expect(() => externalBotChannelIdSchema.parse("team/private")).toThrow();
   });
 });

@@ -422,7 +422,9 @@ export class AdminService {
     requireOwner(identity);
     const current = await this.findBotChannel(identity.workspaceId, provider, externalChannelId);
     if (current === null) throw botChannelNotFound();
-    const displayName = request.displayName ?? current.display_name;
+    const displayName = request.displayName === undefined
+      ? current.display_name
+      : request.displayName;
     const enabled = request.enabled ?? current.enabled === 1;
     const now = monotonicTimestamp(current.updated_at);
     await this.database.batch([

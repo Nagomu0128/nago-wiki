@@ -49,10 +49,10 @@ describe("HttpWikiApi", () => {
     vi.stubGlobal("fetch", fetchMock);
     const api = new HttpWikiApi("https://wiki.example/api/v1");
 
-    await api.deleteBotChannel("discord", "team / private");
+    await api.deleteBotChannel("discord", "team:private");
 
     expect(fetchMock).toHaveBeenCalledWith(
-      "https://wiki.example/api/v1/admin/bot-channels/discord/team%20%2F%20private",
+      "https://wiki.example/api/v1/admin/bot-channels/discord/team%3Aprivate",
       expect.objectContaining({ method: "DELETE", credentials: "same-origin" }),
     );
   });
