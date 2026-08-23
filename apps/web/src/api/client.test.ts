@@ -22,4 +22,21 @@ describe("HttpWikiApi", () => {
 
     await expect(api.getTree()).rejects.toMatchObject({ code: "NETWORK_ERROR", status: 0 });
   });
+
+  it("uses scoped organization endpoints for favorites, tags, and backlinks", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(Response.json({ favorite: true }))
+      .mockResolvedValueOnce(Response.json({ tags: [{ id: "40000000-0000-4000-8000-000000000001", name: "AI" }] }))
+      .mockResolvedValueOnce(Response.json({ pages: [] }));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = new HttpWikiApi("https://wiki.example/api/v1");
+
+    await api.setFavorite("page/one", true);
+    await api.replacePageTags("page/one", ["AI"]);
+    await api.getBacklinks("page/one");
+
+    expect(fetchMock).toHaveBeenNthCalledWith(1, "https://wiki.example/api/v1/pages/page%2Fone/favorite", expect.objectContaining({ method: "PUT" }));
+    expect(fetchMock).toHaveBeenNthCalledWith(2, "https://wiki.example/api/v1/pages/page%2Fone/tags", expect.objectContaining({ method: "PUT", body: JSON.stringify({ names: ["AI"] }) }));
+    expect(fetchMock).toHaveBeenNthCalledWith(3, "https://wiki.example/api/v1/pages/page%2Fone/backlinks", expect.any(Object));
+  });
 });
