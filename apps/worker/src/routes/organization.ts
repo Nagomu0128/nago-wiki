@@ -4,6 +4,7 @@ import { z } from "zod";
 import { requireIdentity, type CoreHonoEnv } from "../core/context";
 import { ApiProblem } from "../core/errors";
 import { TagsService } from "../core/tags-service";
+import { decodeCursor, encodeCursor } from "../mcp/pagination";
 import { McpWikiRepository } from "../mcp/repository";
 
 const replaceTagsSchema = z.object({
@@ -35,6 +36,17 @@ export function createOrganizationRoutes(): Hono<CoreHonoEnv> {
 
   routes.get("/pages/:id/backlinks", async (context) => {
     const identity = requireIdentity(context);
+    const encodedCursor = context.req.query("cursor");
+    const cursor = decodeCursor(encodedCursor);
+    const requestedLimit = Number.parseInt(context.req.query("limit") ?? "50", 10);
+    if (
+      (encodedCursor !== undefined && cursor === null) ||
+      !Number.isInteger(requestedLimit) ||
+      requestedLimit < 1 ||
+      requestedLimit > 50
+    ) {
+      throw new ApiProblem("INVALID_REQUEST", 400, "Invalid pagination parameters");
+    }
     const repository = new McpWikiRepository(
       context.env.DB,
       new URL(context.env.MCP_PUBLIC_ORIGIN).origin,
@@ -47,18 +59,21 @@ export function createOrganizationRoutes(): Hono<CoreHonoEnv> {
     if (target === null) {
       throw new ApiProblem("PAGE_NOT_FOUND", 404, "Page was not found or is not visible");
     }
-    const pages = await repository.getBacklinks(
+    const result = await repository.getBacklinks(
       identity.id,
       identity.workspaceId,
       target.id,
+      cursor,
+      requestedLimit,
     );
     return context.json({
-      pages: pages.map((page) => ({
+      pages: result.pages.map((page) => ({
         id: page.id,
         title: page.title,
         path: page.path,
         url: page.url,
       })),
+      cursor: result.nextCursor === null ? null : encodeCursor(result.nextCursor),
     });
   });
 

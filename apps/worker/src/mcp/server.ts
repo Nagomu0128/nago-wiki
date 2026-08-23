@@ -5,6 +5,7 @@ import { D1SearchCandidateAuthorizer } from "../ai/authorizer";
 import { recordChatAudit } from "../ai/audit";
 import { WikiAnswerService, WorkersAiAnswerModel } from "../ai/answer-service";
 import { WikiSearchService } from "../ai/search-service";
+import { decodeCursor, encodeCursor } from "./pagination";
 import { McpWikiRepository } from "./repository";
 import type { McpAuthProps, McpRuntimeEnv } from "./types";
 
@@ -89,22 +90,24 @@ export function createWikiMcpServer(
       inputSchema: z.object({
         parentPageId: z.string().min(1).max(128).nullable().default(null),
         cursor: z.string().max(2_000).optional(),
-        limit: z.number().int().min(1).max(100).default(50),
+        limit: z.number().int().min(1).max(50).default(50),
       }),
     },
     async ({ parentPageId, cursor, limit }) => {
+      const decodedCursor = decodeCursor(cursor);
+      if (cursor !== undefined && decodedCursor === null) {
+        return errorResult("Invalid pagination cursor");
+      }
       const children = await repository.listChildren(
         auth.userId,
         auth.workspaceId,
         parentPageId,
+        decodedCursor,
+        limit,
       );
-      const offset = decodeCursor(cursor);
-      const page = children.slice(offset, offset + limit);
       return jsonResult({
-        pages: page,
-        cursor: offset + page.length < children.length
-          ? btoa(String(offset + page.length))
-          : null,
+        pages: children.pages,
+        cursor: children.nextCursor === null ? null : encodeCursor(children.nextCursor),
       });
     },
   );
@@ -116,10 +119,27 @@ export function createWikiMcpServer(
       description: "List readable pages that link to the target wiki page.",
       inputSchema: z.object({
         pageId: z.string().min(1).max(128),
+        cursor: z.string().max(2_000).optional(),
+        limit: z.number().int().min(1).max(50).default(50),
       }),
     },
-    async ({ pageId }) =>
-      jsonResult(await repository.getBacklinks(auth.userId, auth.workspaceId, pageId)),
+    async ({ pageId, cursor, limit }) => {
+      const decodedCursor = decodeCursor(cursor);
+      if (cursor !== undefined && decodedCursor === null) {
+        return errorResult("Invalid pagination cursor");
+      }
+      const backlinks = await repository.getBacklinks(
+        auth.userId,
+        auth.workspaceId,
+        pageId,
+        decodedCursor,
+        limit,
+      );
+      return jsonResult({
+        pages: backlinks.pages,
+        cursor: backlinks.nextCursor === null ? null : encodeCursor(backlinks.nextCursor),
+      });
+    },
   );
 
   server.registerTool(
@@ -151,16 +171,6 @@ export function createWikiMcpServer(
   );
 
   return server;
-}
-
-function decodeCursor(cursor: string | undefined): number {
-  if (cursor === undefined) return 0;
-  try {
-    const value = Number.parseInt(atob(cursor), 10);
-    return Number.isSafeInteger(value) && value >= 0 ? value : 0;
-  } catch {
-    return 0;
-  }
 }
 
 function jsonResult(value: unknown) {
