@@ -22,8 +22,9 @@ import { isMcpOAuthPath } from "./mcp/security";
 import type { McpRuntimeEnv } from "./mcp/types";
 import { PageRoom } from "./realtime/page-room";
 import { createRealtimeRoutes } from "./realtime/routes";
-import { createPagesRoutes } from "./routes/pages";
+import { createAssetRoutes } from "./routes/assets";
 import { createOrganizationRoutes } from "./routes/organization";
+import { createPagesRoutes } from "./routes/pages";
 import { createSessionRoutes } from "./routes/session";
 
 export { DiscordGatewayContainer, PageRoom };
@@ -89,6 +90,7 @@ app.route(
 );
 app.route("/api/v1", createSessionRoutes());
 app.route("/api/v1", createOrganizationRoutes());
+app.route("/api/v1", createAssetRoutes());
 app.route("/api/v1", createAiRoutes());
 app.route("/api/v1", createImportRoutes());
 app.route("/api/v1", createBotRoutes());
