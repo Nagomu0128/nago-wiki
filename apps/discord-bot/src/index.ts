@@ -2,12 +2,18 @@ import { createHmac } from "node:crypto";
 import { createServer } from "node:http";
 import { pathToFileURL } from "node:url";
 
+import { REST } from "@discordjs/rest";
 import {
-  Client,
+  WebSocketManager,
+  WebSocketShardEvents,
+  type SessionInfo,
+} from "@discordjs/ws";
+import {
+  GatewayDispatchEvents,
   GatewayIntentBits,
-  Partials,
-  type Message,
-} from "discord.js";
+  Routes,
+  type GatewayMessageCreateDispatchData,
+} from "discord-api-types/v10";
 
 interface BridgeResponse {
   answer: string | null;
@@ -19,6 +25,72 @@ interface RuntimeConfiguration {
   bridgeSecret: string;
   workerUrl: string;
   port: number;
+}
+
+export interface DiscordSessionStore {
+  get(shardId: number): Promise<SessionInfo | null>;
+  put(shardId: number, session: SessionInfo | null): Promise<void>;
+}
+
+type FetchImplementation = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+
+export class RemoteDiscordSessionStore implements DiscordSessionStore {
+  public constructor(
+    private readonly workerUrl: string,
+    private readonly bridgeSecret: string,
+    private readonly fetchImplementation: FetchImplementation = fetch,
+  ) {}
+
+  public async get(shardId: number): Promise<SessionInfo | null> {
+    const response = await this.request(shardId, "GET", "");
+    if (!response.ok) {
+      throw new Error(`Discord session load failed with status ${String(response.status)}`);
+    }
+    const value: unknown = await response.json();
+    if (!isRecord(value) || !("session" in value)) {
+      throw new Error("Discord session store returned an invalid response");
+    }
+    if (value.session === null) return null;
+    if (!isSessionInfo(value.session) || value.session.shardId !== shardId) {
+      throw new Error("Discord session store returned an invalid session");
+    }
+    return value.session;
+  }
+
+  public async put(shardId: number, session: SessionInfo | null): Promise<void> {
+    if (session !== null && session.shardId !== shardId) {
+      throw new Error("Discord session shard does not match the storage key");
+    }
+    const body = JSON.stringify({ session });
+    const response = await this.request(shardId, "PUT", body);
+    if (!response.ok) {
+      throw new Error(`Discord session save failed with status ${String(response.status)}`);
+    }
+  }
+
+  private request(shardId: number, method: "GET" | "PUT", body: string) {
+    const timestamp = String(Math.floor(Date.now() / 1_000));
+    const signature = createHmac("sha256", this.bridgeSecret)
+      .update(`${timestamp}.${body}`)
+      .digest("hex");
+    return this.fetchImplementation(
+      new URL(
+        `/api/v1/internal/discord-session/${encodeURIComponent(String(shardId))}`,
+        this.workerUrl,
+      ),
+      {
+        method,
+        headers: {
+          accept: "application/json",
+          "content-type": "application/json",
+          "x-nago-timestamp": timestamp,
+          "x-nago-signature": signature,
+        },
+        ...(method === "PUT" ? { body } : {}),
+        signal: AbortSignal.timeout(10_000),
+      },
+    );
+  }
 }
 
 export function normalizeMentionQuery(content: string, botUserId: string): string {
@@ -44,63 +116,93 @@ export function splitDiscordMessage(content: string, limit = 1_900): string[] {
 
 export async function runDiscordGateway(
   configuration = readConfiguration(),
+  sessionStore: DiscordSessionStore = new RemoteDiscordSessionStore(
+    configuration.workerUrl,
+    configuration.bridgeSecret,
+  ),
 ): Promise<void> {
-  const client = new Client({
-    intents: [
-      GatewayIntentBits.Guilds,
-      GatewayIntentBits.GuildMessages,
-      GatewayIntentBits.DirectMessages,
-      GatewayIntentBits.MessageContent,
-    ],
-    partials: [Partials.Channel],
+  const rest = new REST({ version: "10" }).setToken(configuration.discordToken);
+  const manager = new WebSocketManager({
+    token: configuration.discordToken,
+    rest,
+    intents:
+      GatewayIntentBits.Guilds
+      | GatewayIntentBits.GuildMessages
+      | GatewayIntentBits.DirectMessages
+      | GatewayIntentBits.MessageContent,
+    retrieveSessionInfo: (shardId) => sessionStore.get(shardId),
+    updateSessionInfo: (shardId, session) => sessionStore.put(shardId, session),
   });
+  let ready = false;
+  let botUserId: string | null = null;
   const healthServer = createServer((_request, response) => {
-    response.writeHead(client.isReady() ? 200 : 503, {
+    response.writeHead(ready ? 200 : 503, {
       "content-type": "application/json",
     });
-    response.end(JSON.stringify({ ready: client.isReady() }));
+    response.end(JSON.stringify({ ready }));
   });
   healthServer.listen(configuration.port, "0.0.0.0");
 
-  client.once("ready", (readyClient) => {
-    console.info("Discord gateway connected", { botUserId: readyClient.user.id });
+  manager.on(WebSocketShardEvents.Ready, ({ data, shardId }) => {
+    ready = true;
+    botUserId = data.user.id;
+    console.info("Discord gateway connected", { botUserId, shardId });
   });
-  client.on("messageCreate", (message) => {
-    void handleMessage(client, message, configuration).catch((error: unknown) => {
-      console.error("Discord message handling failed", {
-        messageId: message.id,
-        error: error instanceof Error ? error.message : "Unknown error",
-      });
+  manager.on(WebSocketShardEvents.Resumed, ({ shardId }) => {
+    ready = true;
+    console.info("Discord gateway session resumed", { shardId });
+  });
+  manager.on(WebSocketShardEvents.Closed, ({ code, shardId }) => {
+    ready = false;
+    console.warn("Discord gateway disconnected", { code, shardId });
+  });
+  manager.on(WebSocketShardEvents.Error, ({ error, shardId }) => {
+    ready = false;
+    console.error("Discord gateway error", {
+      shardId,
+      error: error.message,
     });
+  });
+  manager.on(WebSocketShardEvents.Dispatch, ({ data }) => {
+    if (data.t !== GatewayDispatchEvents.MessageCreate || botUserId === null) return;
+    const message: GatewayMessageCreateDispatchData = data.d;
+    void handleMessage(rest, message, botUserId, configuration).catch(
+      (error: unknown) => {
+        console.error("Discord message handling failed", {
+          messageId: message.id,
+          error: error instanceof Error ? error.message : "Unknown error",
+        });
+      },
+    );
   });
 
   const shutdown = (): void => {
-    void client.destroy();
+    void manager.destroy();
     healthServer.close();
   };
   process.once("SIGTERM", shutdown);
   process.once("SIGINT", shutdown);
-  await client.login(configuration.discordToken);
+  await manager.connect();
 }
 
 async function handleMessage(
-  client: Client,
-  message: Message,
+  rest: REST,
+  message: GatewayMessageCreateDispatchData,
+  botUserId: string,
   configuration: RuntimeConfiguration,
 ): Promise<void> {
-  if (message.author.bot || client.user === null) return;
-  const isDirectMessage = message.guildId === null;
-  if (!isDirectMessage && !message.mentions.users.has(client.user.id)) return;
-  const query = normalizeMentionQuery(message.content, client.user.id);
+  if (message.author.bot === true) return;
+  const isDirectMessage = message.guild_id === undefined;
+  if (!isDirectMessage && !message.mentions.some((user) => user.id === botUserId)) return;
+  const query = normalizeMentionQuery(message.content, botUserId);
   if (query.length === 0) return;
-  if (!message.channel.isSendable()) return;
 
-  await message.channel.sendTyping();
+  await rest.post(Routes.channelTyping(message.channel_id));
   const body = JSON.stringify({
     provider: "discord",
     eventId: message.id,
     externalUserId: message.author.id,
-    externalChannelId: isDirectMessage ? null : message.channelId,
+    externalChannelId: isDirectMessage ? null : message.channel_id,
     query,
   });
   const response = await fetchBridgeWithRetry(
@@ -113,12 +215,34 @@ async function handleMessage(
   }
   const result = parseBridgeResponse(await response.json());
   if (result.answer === null) return;
-  const [first, ...rest] = splitDiscordMessage(result.answer);
+  const [first, ...remainingChunks] = splitDiscordMessage(result.answer);
   if (first === undefined) return;
-  await message.reply({ content: first, allowedMentions: { parse: [] } });
-  for (const chunk of rest) {
-    await message.channel.send({ content: chunk, allowedMentions: { parse: [] } });
+  await sendDiscordMessage(rest, message.channel_id, first, message.id);
+  for (const chunk of remainingChunks) {
+    await sendDiscordMessage(rest, message.channel_id, chunk);
   }
+}
+
+async function sendDiscordMessage(
+  rest: REST,
+  channelId: string,
+  content: string,
+  replyTo?: string,
+): Promise<void> {
+  await rest.post(Routes.channelMessages(channelId), {
+    body: {
+      content,
+      allowed_mentions: { parse: [] },
+      ...(replyTo === undefined
+        ? {}
+        : {
+            message_reference: {
+              message_id: replyTo,
+              fail_if_not_exists: false,
+            },
+          }),
+    },
+  });
 }
 
 export async function fetchBridgeWithRetry(
@@ -188,6 +312,27 @@ function parseBridgeResponse(value: unknown): BridgeResponse {
     answer,
     ...(typeof duplicate === "boolean" ? { duplicate } : {}),
   };
+}
+
+function isSessionInfo(value: unknown): value is SessionInfo {
+  return isRecord(value)
+    && typeof value.resumeURL === "string"
+    && value.resumeURL.startsWith("wss://")
+    && typeof value.sequence === "number"
+    && Number.isSafeInteger(value.sequence)
+    && value.sequence >= 0
+    && typeof value.sessionId === "string"
+    && value.sessionId.length > 0
+    && typeof value.shardCount === "number"
+    && Number.isSafeInteger(value.shardCount)
+    && value.shardCount > 0
+    && typeof value.shardId === "number"
+    && Number.isSafeInteger(value.shardId)
+    && value.shardId >= 0;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 function readConfiguration(): RuntimeConfiguration {

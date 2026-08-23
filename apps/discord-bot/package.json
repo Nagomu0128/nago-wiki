@@ -9,6 +9,9 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@discordjs/rest": "^2.6.3",
+    "@discordjs/ws": "^2.0.4",
+    "discord-api-types": "^0.38.53",
     "discord.js": "^14.27.0"
   }
 }

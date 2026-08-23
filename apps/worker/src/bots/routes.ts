@@ -30,6 +30,14 @@ const discordQuerySchema = z.object({
   query: z.string().trim().min(1).max(5_000),
 });
 
+const discordSessionSchema = z.object({
+  resumeURL: z.url().refine((value) => new URL(value).protocol === "wss:"),
+  sequence: z.number().int().nonnegative(),
+  sessionId: z.string().min(1).max(512),
+  shardCount: z.number().int().positive().max(1_000),
+  shardId: z.number().int().nonnegative().max(999),
+});
+
 export function createBotRoutes(): Hono<BotApi> {
   const routes = new Hono<BotApi>();
 
@@ -84,7 +92,59 @@ export function createBotRoutes(): Hono<BotApi> {
     }
   });
 
+  routes.get("/internal/discord-session/:shardId", async (context) => {
+    await requireBridgeSignature(context.req.raw, context.env.DISCORD_BRIDGE_SECRET, "");
+    const shardId = parseShardId(context.req.param("shardId"));
+    const session = await context.env.DISCORD_GATEWAY
+      .getByName("gateway")
+      .getGatewaySession(shardId);
+    return context.json({ session });
+  });
+
+  routes.put("/internal/discord-session/:shardId", async (context) => {
+    const body = await context.req.text();
+    await requireBridgeSignature(context.req.raw, context.env.DISCORD_BRIDGE_SECRET, body);
+    const shardId = parseShardId(context.req.param("shardId"));
+    const parsed = z.object({ session: discordSessionSchema.nullable() }).safeParse(
+      parseJson(body),
+    );
+    if (
+      !parsed.success ||
+      (parsed.data.session !== null && parsed.data.session.shardId !== shardId)
+    ) {
+      throw new HTTPException(400, { message: "Invalid Discord session" });
+    }
+    await context.env.DISCORD_GATEWAY
+      .getByName("gateway")
+      .saveGatewaySession(
+        shardId,
+        parsed.data.session,
+      );
+    return context.body(null, 204);
+  });
+
   return routes;
+}
+
+async function requireBridgeSignature(
+  request: Request,
+  secret: string,
+  body: string,
+): Promise<void> {
+  const verified = await verifyBridgeSignature(
+    body,
+    request.headers.get("x-nago-timestamp"),
+    request.headers.get("x-nago-signature"),
+    secret,
+  );
+  if (!verified) throw new HTTPException(401, { message: "Invalid bridge signature" });
+}
+
+function parseShardId(value: string): number {
+  if (!/^\d{1,3}$/u.test(value)) {
+    throw new HTTPException(400, { message: "Invalid Discord shard" });
+  }
+  return Number(value);
 }
 
 function requireUserId(contextUserId: string | undefined): string {

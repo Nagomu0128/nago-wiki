@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   fetchBridgeWithRetry,
   normalizeMentionQuery,
+  RemoteDiscordSessionStore,
   splitDiscordMessage,
 } from "./index";
 
@@ -49,6 +50,44 @@ describe("fetchBridgeWithRetry", () => {
       const headers = call[1]?.headers as Record<string, string> | undefined;
       expect(typeof headers?.["x-nago-timestamp"]).toBe("string");
       expect(typeof headers?.["x-nago-signature"]).toBe("string");
+    }
+  });
+});
+
+describe("RemoteDiscordSessionStore", () => {
+  it("loads and persists resumable Gateway state through signed requests", async () => {
+    const session = {
+      resumeURL: "wss://gateway.discord.gg",
+      sequence: 42,
+      sessionId: "session-1",
+      shardCount: 1,
+      shardId: 0,
+    };
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json({ session }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    const store = new RemoteDiscordSessionStore(
+      "https://wiki.example",
+      "bridge-secret",
+      fetchMock,
+    );
+
+    await expect(store.get(0)).resolves.toEqual(session);
+    await store.put(0, session);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const firstInput = fetchMock.mock.calls[0]?.[0];
+    if (!(firstInput instanceof URL)) throw new Error("Expected a session URL");
+    expect(firstInput.pathname).toBe("/api/v1/internal/discord-session/0");
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({ method: "GET" });
+    expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({
+      method: "PUT",
+      body: JSON.stringify({ session }),
+    });
+    for (const call of fetchMock.mock.calls) {
+      const headers = call[1]?.headers as Record<string, string> | undefined;
+      expect(headers?.["x-nago-signature"]).toMatch(/^[a-f\d]{64}$/u);
     }
   });
 });

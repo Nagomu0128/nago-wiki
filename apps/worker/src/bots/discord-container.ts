@@ -6,6 +6,14 @@ export interface DiscordContainerEnvironment extends McpRuntimeEnv {
   DISCORD_BOT_TOKEN: string;
 }
 
+export interface DiscordGatewaySession {
+  resumeURL: string;
+  sequence: number;
+  sessionId: string;
+  shardCount: number;
+  shardId: number;
+}
+
 export class DiscordGatewayContainer extends Container<DiscordContainerEnvironment> {
   public override defaultPort = 8080;
   public override sleepAfter = "24h";
@@ -25,4 +33,32 @@ export class DiscordGatewayContainer extends Container<DiscordContainerEnvironme
       PORT: "8080",
     };
   }
+
+  public override onActivityExpired(): Promise<void> {
+    // Discord Gateway is intentionally always-on. Not stopping renews the
+    // Container activity window, as documented by Cloudflare Containers.
+    this.renewActivityTimeout();
+    return Promise.resolve();
+  }
+
+  public getGatewaySession(shardId: number): Promise<DiscordGatewaySession | null> {
+    return this.ctx.storage.get<DiscordGatewaySession>(sessionKey(shardId)).then(
+      (value) => value ?? null,
+    );
+  }
+
+  public async saveGatewaySession(
+    shardId: number,
+    session: DiscordGatewaySession | null,
+  ): Promise<void> {
+    if (session === null) {
+      await this.ctx.storage.delete(sessionKey(shardId));
+      return;
+    }
+    await this.ctx.storage.put(sessionKey(shardId), session);
+  }
+}
+
+function sessionKey(shardId: number): string {
+  return `discord:gateway-session:${String(shardId)}`;
 }
