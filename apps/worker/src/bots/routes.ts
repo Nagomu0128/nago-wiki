@@ -3,7 +3,11 @@ import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 
-import { issueAccountLinkCode } from "./account-link";
+import {
+  issueAccountLinkCode,
+  listLinkedBotAccounts,
+  unlinkBotAccount,
+} from "./account-link";
 import { handleLineWebhook } from "./line";
 import {
   answerBotQuery,
@@ -12,6 +16,7 @@ import {
 } from "./service";
 import { verifyBridgeSignature } from "./signatures";
 import type { McpRuntimeEnv } from "../mcp/types";
+import { ApiProblem } from "../core/errors";
 
 interface BotApi {
   Bindings: McpRuntimeEnv;
@@ -57,6 +62,22 @@ export function createBotRoutes(): Hono<BotApi> {
     },
   );
 
+  routes.get("/account-links", async (context) => {
+    const userId = requireUserId(context.get("userId"));
+    const accounts = await listLinkedBotAccounts(context.env.DB, userId);
+    return context.json({ accounts });
+  });
+
+  routes.delete("/account-links/:provider", async (context) => {
+    const provider = context.req.param("provider");
+    if (provider !== "discord" && provider !== "line") {
+      throw new ApiProblem("INVALID_REQUEST", 400, "Invalid bot provider");
+    }
+    const userId = requireUserId(context.get("userId"));
+    await unlinkBotAccount(context.env.DB, userId, provider);
+    return context.body(null, 204);
+  });
+
   routes.post("/internal/bot-query", async (context) => {
     const body = await context.req.text();
     const verified = await verifyBridgeSignature(
@@ -89,7 +110,7 @@ export function createBotRoutes(): Hono<BotApi> {
 
 function requireUserId(contextUserId: string | undefined): string {
   if (contextUserId === undefined || contextUserId.length === 0) {
-    throw new HTTPException(401, { message: "Authentication required" });
+    throw new ApiProblem("AUTHENTICATION_REQUIRED", 401, "Authentication is required");
   }
   return contextUserId;
 }

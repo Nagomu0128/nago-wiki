@@ -10,6 +10,12 @@ interface ExternalIdentityRow {
   user_id: string;
 }
 
+interface LinkedIdentityRow extends ExternalIdentityRow {
+  provider: "discord" | "line";
+  external_subject: string;
+  linked_at: string;
+}
+
 export async function issueAccountLinkCode(
   database: D1Database,
   userId: string,
@@ -71,6 +77,27 @@ export async function consumeAccountLinkCode(
       .bind(linkCode.id, marker),
     database
       .prepare(
+        `INSERT INTO audit_events
+           (id, actor_id, action, target_type, target_id, metadata_json, created_at)
+         SELECT ?1, user_id, 'bot_identity.linked', 'user', user_id, ?2, ?3
+           FROM account_link_codes
+          WHERE id = ?4 AND consumed_at = ?5
+            AND NOT EXISTS (
+              SELECT 1 FROM external_identities
+               WHERE provider = ?6 AND external_subject = ?7
+            )`,
+      )
+      .bind(
+        crypto.randomUUID(),
+        JSON.stringify({ provider }),
+        new Date().toISOString(),
+        linkCode.id,
+        marker,
+        provider,
+        externalSubject,
+      ),
+    database
+      .prepare(
         `INSERT OR IGNORE INTO external_identities
            (provider, external_subject, user_id, linked_at)
          SELECT ?1, ?2, user_id, ?3
@@ -87,6 +114,60 @@ export async function consumeAccountLinkCode(
     .bind(provider, externalSubject)
     .first<ExternalIdentityRow>();
   return linked?.user_id === linkCode.user_id;
+}
+
+export async function listLinkedBotAccounts(
+  database: D1Database,
+  userId: string,
+): Promise<
+  { provider: "discord" | "line"; externalSubjectMasked: string; linkedAt: string }[]
+> {
+  const result = await database
+    .prepare(
+      `SELECT provider, external_subject, user_id, linked_at
+         FROM external_identities
+        WHERE user_id = ?1 AND provider IN ('discord', 'line')
+        ORDER BY provider`,
+    )
+    .bind(userId)
+    .all<LinkedIdentityRow>();
+  return result.results.map((row) => ({
+    provider: row.provider,
+    externalSubjectMasked: maskExternalSubject(row.external_subject),
+    linkedAt: row.linked_at,
+  }));
+}
+
+export async function unlinkBotAccount(
+  database: D1Database,
+  userId: string,
+  provider: "discord" | "line",
+): Promise<boolean> {
+  const existing = await database
+    .prepare(
+      `SELECT provider, external_subject, user_id, linked_at
+         FROM external_identities
+        WHERE user_id = ?1 AND provider = ?2`,
+    )
+    .bind(userId, provider)
+    .first<LinkedIdentityRow>();
+  if (existing === null) return false;
+  const now = new Date().toISOString();
+  await database.batch([
+    database
+      .prepare(
+        `DELETE FROM external_identities WHERE user_id = ?1 AND provider = ?2`,
+      )
+      .bind(userId, provider),
+    database
+      .prepare(
+        `INSERT INTO audit_events
+           (id, actor_id, action, target_type, target_id, metadata_json, created_at)
+         VALUES (?1, ?2, 'bot_identity.unlinked', 'user', ?2, ?3, ?4)`,
+      )
+      .bind(crypto.randomUUID(), userId, JSON.stringify({ provider }), now),
+  ]);
+  return true;
 }
 
 export async function resolveExternalUser(
@@ -118,4 +199,10 @@ function base64Url(value: Uint8Array): string {
   let binary = "";
   for (const byte of value) binary += String.fromCodePoint(byte);
   return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/u, "");
+}
+
+function maskExternalSubject(value: string): string {
+  const visible = value.slice(-4);
+  const hiddenLength = Math.min(8, Math.max(4, value.length - visible.length));
+  return `${"•".repeat(hiddenLength)}${visible}`;
 }

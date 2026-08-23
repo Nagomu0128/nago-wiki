@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import type { MiddlewareHandler } from "hono";
 
 import { createAiRoutes } from "./ai/routes";
+import { createAdminRoutes } from "./admin/routes";
 import { createAccessAuthenticationMiddleware } from "./auth/access";
 import { createBotRoutes } from "./bots/routes";
 import { DiscordGatewayContainer } from "./bots/discord-container";
@@ -60,6 +61,8 @@ for (const path of [
   "/api/v1/imports/:id/apply",
   "/api/v1/imports/google/authorize",
   "/api/v1/account-links",
+  "/api/v1/account-links/*",
+  "/api/v1/admin/*",
 ]) {
   app.use(path, accessAuthentication, exposeIdentity);
 }
@@ -89,6 +92,7 @@ app.route(
 );
 app.route("/api/v1", createSessionRoutes());
 app.route("/api/v1", createOrganizationRoutes());
+app.route("/api/v1", createAdminRoutes());
 app.route("/api/v1", createAiRoutes());
 app.route("/api/v1", createImportRoutes());
 app.route("/api/v1", createBotRoutes());
