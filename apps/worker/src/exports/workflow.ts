@@ -19,6 +19,7 @@ import {
   portableExportAssetSchema,
   portableExportCommentSchema,
   portableExportLinkSchema,
+  portableExportMemberSchema,
   portableExportPageSchema,
   portableExportPageTagSchema,
   portableExportTagSchema,
@@ -27,6 +28,7 @@ import {
   type PortableExportAsset,
   type PortableExportComment,
   type PortableExportLink,
+  type PortableExportMember,
   type PortableExportPage,
   type PortableExportPageTag,
   type PortableExportTag,
@@ -45,10 +47,7 @@ export const exportWorkflowParamsSchema = z
     requestedBy: z.string().min(1),
     purpose: z.enum(["download", "backup"]).default("download"),
     backupDate: z.iso.date().nullable().default(null),
-    retentionClass: z
-      .enum(["weekly", "monthly"])
-      .nullable()
-      .default(null),
+    retentionClass: z.enum(["weekly", "monthly"]).nullable().default(null),
   })
   .superRefine((value, context) => {
     const validDownload =
@@ -77,7 +76,9 @@ const storedPlanSchema = z.object({
   formatVersion: z.literal(1),
   exportId: z.string(),
   workspaceId: z.string(),
+  workspaceName: z.string(),
   exportedAt: z.string(),
+  members: z.array(portableExportMemberSchema),
   pages: z.array(portableExportPageSchema),
   assets: z.array(portableExportAssetSchema),
   acl: z.array(portableExportAclSchema),
@@ -161,6 +162,20 @@ interface AclRow {
   user_id: string;
   user_email: string;
   permission: "editor" | "viewer";
+  created_at: string;
+  updated_at: string;
+}
+
+interface WorkspaceRow {
+  name: string;
+}
+
+interface MemberRow {
+  id: string;
+  email: string;
+  display_name: string;
+  role: "owner" | "editor" | "viewer";
+  status: "active" | "suspended";
   created_at: string;
   updated_at: string;
 }
@@ -302,11 +317,8 @@ export class ExportWorkflow extends WorkflowEntrypoint<
         return { removed: stagedParts.length };
       });
       await step.do("publish portable export", async () => {
-        const expiresAt = new Date(
-          Date.now() +
-            retentionDaysForExport(parameters) * 24 * 60 * 60 * 1_000,
-        ).toISOString();
         const now = new Date().toISOString();
+        const expiresAt = retentionExpiresAt(parameters, new Date(now));
         await this.env.DB.batch([
           this.env.DB.prepare(
             `UPDATE exports
@@ -411,22 +423,36 @@ async function createAndStorePlan(
   environment: McpRuntimeEnv,
   parameters: ExportWorkflowParams,
 ): Promise<PlanStepResult> {
-  const [pages, assets, acl, tags, pageTags, links, aliases, comments] =
-    await Promise.all([
-      listExportPages(environment.DB, parameters.workspaceId),
-      listExportAssets(environment.FILES, parameters.workspaceId),
-      listExportAcl(environment.DB, parameters.workspaceId),
-      listExportTags(environment.DB, parameters.workspaceId),
-      listExportPageTags(environment.DB, parameters.workspaceId),
-      listExportLinks(environment.DB, parameters.workspaceId),
-      listExportAliases(environment.DB, parameters.workspaceId),
-      listExportComments(environment.DB, parameters.workspaceId),
-    ]);
+  const [
+    workspaceName,
+    members,
+    pages,
+    assets,
+    acl,
+    tags,
+    pageTags,
+    links,
+    aliases,
+    comments,
+  ] = await Promise.all([
+    getExportWorkspaceName(environment.DB, parameters.workspaceId),
+    listExportMembers(environment.DB, parameters.workspaceId),
+    listExportPages(environment.DB, parameters.workspaceId),
+    listExportAssets(environment.FILES, parameters.workspaceId),
+    listExportAcl(environment.DB, parameters.workspaceId),
+    listExportTags(environment.DB, parameters.workspaceId),
+    listExportPageTags(environment.DB, parameters.workspaceId),
+    listExportLinks(environment.DB, parameters.workspaceId),
+    listExportAliases(environment.DB, parameters.workspaceId),
+    listExportComments(environment.DB, parameters.workspaceId),
+  ]);
   const exportedAt = new Date().toISOString();
   const manifestInput: PortableManifestInput = {
     exportId: parameters.exportId,
     workspaceId: parameters.workspaceId,
+    workspaceName,
     exportedAt,
+    members,
     pages,
     assets,
     acl,
@@ -451,7 +477,9 @@ async function createAndStorePlan(
     formatVersion: 1,
     exportId: parameters.exportId,
     workspaceId: parameters.workspaceId,
+    workspaceName,
     exportedAt,
+    members,
     pages,
     assets,
     acl,
@@ -641,9 +669,7 @@ export async function* streamStagedRange(
         range: { offset: relativeOffset, length: take },
       });
       if (object === null) throw new Error("Staged export segment is missing");
-      const reader = (
-        object.body as ReadableStream<Uint8Array>
-      ).getReader();
+      const reader = (object.body as ReadableStream<Uint8Array>).getReader();
       let received = 0;
       try {
         let result = await reader.read();
@@ -688,10 +714,7 @@ async function* streamArchivePart(
     let written = 0;
     if (index < plan.pages.length) {
       const page = requiredAt(plan.pages, index, "export page");
-      const data = requirePageBytes(
-        page,
-        pageBodies,
-      );
+      const data = requirePageBytes(page, pageBodies);
       if ((await sha256Bytes(data)) !== page.contentHash) {
         throw new Error("Wiki page content hash does not match its body");
       }
@@ -811,6 +834,41 @@ async function listExportPages(
     if (last !== undefined) cursor = last.id;
   } while (batchSize === 250);
   return result;
+}
+
+async function getExportWorkspaceName(
+  database: D1Database,
+  workspaceId: string,
+): Promise<string> {
+  const workspace = await database
+    .prepare("SELECT name FROM workspaces WHERE id = ?1")
+    .bind(workspaceId)
+    .first<WorkspaceRow>();
+  if (workspace === null) throw new Error("Export workspace does not exist");
+  return workspace.name;
+}
+
+async function listExportMembers(
+  database: D1Database,
+  workspaceId: string,
+): Promise<PortableExportMember[]> {
+  const rows = await listWorkspaceRows<MemberRow>(
+    database,
+    workspaceId,
+    `SELECT id, email, display_name, role, status, created_at, updated_at
+       FROM users
+      WHERE workspace_id = ?1
+      ORDER BY id`,
+  );
+  return rows.map((row) => ({
+    id: row.id,
+    email: row.email,
+    displayName: row.display_name,
+    role: row.role,
+    status: row.status,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }));
 }
 
 async function listExportAssets(
@@ -1059,7 +1117,9 @@ function manifestInput(plan: StoredExportPlan): PortableManifestInput {
   return {
     exportId: plan.exportId,
     workspaceId: plan.workspaceId,
+    workspaceName: plan.workspaceName,
     exportedAt: plan.exportedAt,
+    members: plan.members,
     pages: plan.pages,
     assets: plan.assets,
     acl: plan.acl,
@@ -1130,11 +1190,21 @@ function artifactPrefixFromArchiveKey(archiveKey: string): string {
   return archiveKey.slice(0, slash + 1);
 }
 
-export function retentionDaysForExport(
+export function retentionExpiresAt(
   parameters: ExportWorkflowParams,
-): number {
-  if (parameters.purpose === "download") return 7;
-  return parameters.retentionClass === "monthly" ? 365 : 90;
+  from: Date,
+): string {
+  const expiresAt = new Date(from);
+  if (
+    parameters.purpose === "backup" &&
+    parameters.retentionClass === "monthly"
+  ) {
+    expiresAt.setUTCMonth(expiresAt.getUTCMonth() + 12);
+  } else {
+    const retentionDays = parameters.purpose === "download" ? 7 : 90;
+    expiresAt.setUTCDate(expiresAt.getUTCDate() + retentionDays);
+  }
+  return expiresAt.toISOString();
 }
 
 async function hashR2Object(
