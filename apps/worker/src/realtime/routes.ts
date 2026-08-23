@@ -25,11 +25,16 @@ export interface RealtimeRoutesOptions {
     env: PageRoomEnv,
     identity: AuthenticatedIdentity | undefined,
   ) => Promise<RealtimeRouteAuthorization | null>;
+  publicOrigin: (env: RealtimeRouteEnv) => string;
   now?: () => number;
 }
 
+export interface RealtimeRouteEnv extends PageRoomEnv {
+  MCP_PUBLIC_ORIGIN: string;
+}
+
 interface RealtimeHonoEnv {
-  Bindings: PageRoomEnv;
+  Bindings: RealtimeRouteEnv;
   Variables: { identity: AuthenticatedIdentity | undefined };
 }
 
@@ -44,6 +49,12 @@ export function createRealtimeRoutes(
     }
     if (!hasSubprotocol(request, REALTIME_SUBPROTOCOL)) {
       return context.text(`Expected subprotocol ${REALTIME_SUBPROTOCOL}`, 426);
+    }
+    if (!isAllowedRealtimeOrigin(
+      request.headers.get("origin"),
+      options.publicOrigin(context.env),
+    )) {
+      return context.text("Forbidden", 403);
     }
 
     const pageId = context.req.param("pageId");
@@ -84,6 +95,18 @@ export function createRealtimeRoutes(
     );
   });
   return routes;
+}
+
+export function isAllowedRealtimeOrigin(
+  requestOrigin: string | null,
+  publicOrigin: string,
+): boolean {
+  if (requestOrigin === null) return false;
+  try {
+    return new URL(requestOrigin).origin === new URL(publicOrigin).origin;
+  } catch {
+    return false;
+  }
 }
 
 function hasSubprotocol(request: Request, expected: string): boolean {

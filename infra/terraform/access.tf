@@ -21,6 +21,7 @@ resource "cloudflare_zero_trust_access_application" "wiki" {
   allowed_idps               = compact([var.access_google_identity_provider_id])
   app_launcher_visible       = false
   http_only_cookie_attribute = true
+  same_site_cookie_attribute = "lax"
   options_preflight_bypass   = false
 
   policies = [{

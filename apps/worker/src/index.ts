@@ -68,6 +68,7 @@ for (const path of [
 app.route(
   "/",
   createRealtimeRoutes({
+    publicOrigin: (environment) => environment.MCP_PUBLIC_ORIGIN,
     authorize: async (_request, pageId, environment, identity) => {
       if (identity === undefined) return null;
       const permission = await new AuthorizationService(
