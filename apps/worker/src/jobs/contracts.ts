@@ -17,7 +17,7 @@ export const botQueryJobSchema = z.object({
   externalChannelId: z.string().min(1).nullable(),
   query: z.string().min(1).max(5_000),
   response: z.discriminatedUnion("kind", [
-    z.object({ kind: z.literal("line-reply"), replyToken: z.string().min(1) }),
+    z.object({ kind: z.literal("line-push") }),
   ]),
 });
 

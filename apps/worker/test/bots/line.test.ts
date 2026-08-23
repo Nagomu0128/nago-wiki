@@ -4,7 +4,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   extractLineQuery,
   handleLineWebhook,
-  sendLineReply,
+  lineRetryKey,
+  sendLinePush,
 } from "../../src/bots/line";
 import type { McpRuntimeEnv } from "../../src/mcp/types";
 
@@ -36,24 +37,46 @@ describe("LINE mention extraction", () => {
     expect(extractLineQuery("user", { type: "text", text: "  質問  " })).toBe("質問");
   });
 
-  it("falls back to a push when the reply token has expired", async () => {
+  it("sends an idempotent push with an event-derived retry key", async () => {
     const fetchMock = vi
       .fn<typeof fetch>()
-      .mockResolvedValueOnce(new Response("expired", { status: 400 }))
       .mockResolvedValueOnce(new Response(null, { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
 
-    await sendLineReply(
+    await sendLinePush(
       { LINE_CHANNEL_ACCESS_TOKEN: "token" },
-      "expired-reply-token",
-      "回答",
       "line-user",
+      "回答",
+      "line-event-1",
     );
 
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(fetchMock.mock.calls[1]?.[0]).toBe(
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
       "https://api.line.me/v2/bot/message/push",
     );
+    const headers = fetchMock.mock.calls[0]?.[1]?.headers as Record<string, string>;
+    await expect(lineRetryKey("line-event-1")).resolves.toBe(
+      headers["x-line-retry-key"],
+    );
+    expect(headers["x-line-retry-key"]).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u,
+    );
+  });
+
+  it("treats a duplicate retry key response as delivered", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 409 })),
+    );
+
+    await expect(
+      sendLinePush(
+        { LINE_CHANNEL_ACCESS_TOKEN: "token" },
+        "line-user",
+        "answer",
+        "line-event-1",
+      ),
+    ).resolves.toBeUndefined();
   });
 
   it("releases the event reservation when Queue enqueue fails", async () => {

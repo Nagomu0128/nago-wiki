@@ -74,7 +74,7 @@ export async function handleLineWebhook(
       externalUserId: event.data.source.userId,
       externalChannelId,
       query,
-      response: { kind: "line-reply", replyToken: event.data.replyToken },
+      response: { kind: "line-push" },
     };
     try {
       await environment.ASYNC_JOBS.send(job, { contentType: "json" });
@@ -94,37 +94,37 @@ export async function handleLineWebhook(
   return new Response("OK");
 }
 
-export async function sendLineReply(
+export async function sendLinePush(
   environment: Pick<McpRuntimeEnv, "LINE_CHANNEL_ACCESS_TOKEN">,
-  replyToken: string,
+  pushTarget: string,
   text: string,
-  pushTarget?: string,
+  eventId: string,
 ): Promise<void> {
-  const response = await fetch("https://api.line.me/v2/bot/message/reply", {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${environment.LINE_CHANNEL_ACCESS_TOKEN}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({ replyToken, messages: [{ type: "text", text }] }),
-  });
-  if (response.ok) return;
-  if (pushTarget === undefined) {
-    throw new Error(`LINE reply failed with status ${String(response.status)}`);
-  }
+  const retryKey = await lineRetryKey(eventId);
   const push = await fetch("https://api.line.me/v2/bot/message/push", {
     method: "POST",
     headers: {
       authorization: `Bearer ${environment.LINE_CHANNEL_ACCESS_TOKEN}`,
       "content-type": "application/json",
+      "x-line-retry-key": retryKey,
     },
     body: JSON.stringify({ to: pushTarget, messages: [{ type: "text", text }] }),
   });
-  if (!push.ok) {
-    throw new Error(
-      `LINE reply and push failed with statuses ${String(response.status)}/${String(push.status)}`,
-    );
+  // LINE returns 409 after this retry key has already been accepted. The
+  // original request was delivered, so the Queue replay is complete.
+  if (!push.ok && push.status !== 409) {
+    throw new Error(`LINE push failed with status ${String(push.status)}`);
   }
+}
+
+export async function lineRetryKey(eventId: string): Promise<string> {
+  const digest = new Uint8Array(
+    await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`line:${eventId}`)),
+  ).slice(0, 16);
+  digest[6] = ((digest[6] ?? 0) & 0x0f) | 0x50;
+  digest[8] = ((digest[8] ?? 0) & 0x3f) | 0x80;
+  const hex = [...digest].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 export function extractLineQuery(

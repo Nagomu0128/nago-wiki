@@ -2,7 +2,7 @@ import { asyncJobSchema, type AsyncJob } from "./contracts";
 import { indexPage } from "./index-page";
 import { persistPageVersion } from "./persist-version";
 import { answerBotQuery } from "../bots/service";
-import { sendLineReply } from "../bots/line";
+import { sendLinePush } from "../bots/line";
 import type { McpRuntimeEnv } from "../mcp/types";
 
 export async function consumeAsyncJobs(
@@ -48,11 +48,11 @@ async function dispatchJob(environment: McpRuntimeEnv, job: AsyncJob): Promise<v
     case "bot-query": {
       const response = await answerBotQuery(environment, job);
       if (response !== null) {
-        await sendLineReply(
+        await sendLinePush(
           environment,
-          job.response.replyToken,
-          response,
           job.externalChannelId ?? job.externalUserId,
+          response,
+          job.eventId,
         );
       }
       return;

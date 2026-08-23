@@ -215,11 +215,16 @@ async function handleMessage(
   }
   const result = parseBridgeResponse(await response.json());
   if (result.answer === null) return;
-  const [first, ...remainingChunks] = splitDiscordMessage(result.answer);
-  if (first === undefined) return;
-  await sendDiscordMessage(rest, message.channel_id, first, message.id);
-  for (const chunk of remainingChunks) {
-    await sendDiscordMessage(rest, message.channel_id, chunk);
+  const chunks = splitDiscordMessage(result.answer);
+  for (const [index, chunk] of chunks.entries()) {
+    await sendDiscordMessage(
+      rest,
+      message.channel_id,
+      chunk,
+      message.id,
+      index,
+      index === 0 ? message.id : undefined,
+    );
   }
 }
 
@@ -227,12 +232,16 @@ async function sendDiscordMessage(
   rest: REST,
   channelId: string,
   content: string,
+  eventId: string,
+  chunkIndex: number,
   replyTo?: string,
 ): Promise<void> {
   await rest.post(Routes.channelMessages(channelId), {
     body: {
       content,
       allowed_mentions: { parse: [] },
+      nonce: discordMessageNonce(eventId, chunkIndex),
+      enforce_nonce: true,
       ...(replyTo === undefined
         ? {}
         : {
@@ -243,6 +252,10 @@ async function sendDiscordMessage(
           }),
     },
   });
+}
+
+export function discordMessageNonce(eventId: string, chunkIndex: number): string {
+  return `${eventId.slice(-20)}:${String(chunkIndex)}`;
 }
 
 export async function fetchBridgeWithRetry(

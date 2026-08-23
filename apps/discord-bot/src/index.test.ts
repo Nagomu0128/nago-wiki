@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  discordMessageNonce,
   fetchBridgeWithRetry,
   normalizeMentionQuery,
   RemoteDiscordSessionStore,
@@ -23,6 +24,18 @@ describe("splitDiscordMessage", () => {
     const chunks = splitDiscordMessage("a".repeat(4_500));
     expect(chunks).toHaveLength(3);
     expect(chunks.every((chunk) => chunk.length <= 1_900)).toBe(true);
+  });
+});
+
+describe("discordMessageNonce", () => {
+  it("creates stable per-chunk nonces within Discord's 25 character limit", () => {
+    expect(discordMessageNonce("12345678901234567890", 0)).toBe(
+      "12345678901234567890:0",
+    );
+    expect(discordMessageNonce("12345678901234567890", 1)).not.toBe(
+      discordMessageNonce("12345678901234567890", 0),
+    );
+    expect(discordMessageNonce("x".repeat(100), 99)).toHaveLength(23);
   });
 });
 
