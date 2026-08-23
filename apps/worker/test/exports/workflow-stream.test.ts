@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
   stageArchiveSegment,
   streamStagedRange,
+  groupEntries,
   uploadArchivePart,
   type PlanStepResult,
   type StagedArchivePart,
@@ -15,6 +16,19 @@ import { hashMarkdown } from "../../src/core/markdown";
 import type { McpRuntimeEnv } from "../../src/mcp/types";
 
 describe("portable export archive streaming", () => {
+  it("bounds metadata returned by each staging Workflow step", () => {
+    const zip = planStoredZip(
+      Array.from({ length: 1_001 }, (_, index) => ({
+        name: `pages/${String(index).padStart(5, "0")}.md`,
+        size: 0,
+      })),
+    );
+
+    expect(
+      groupEntries(zip).every((group) => group.end - group.start <= 400),
+    ).toBe(true);
+  });
+
   it("streams an exact range across staged object boundaries", async () => {
     const encoder = new TextEncoder();
     const objects = new Map([
@@ -156,6 +170,23 @@ describe("portable export archive streaming", () => {
       bodyBytes,
       file: `pages/${pageId}.md`,
     };
+    const version = {
+      id: `stage-version-${id}`,
+      pageId,
+      revision: 1,
+      sourceKey: `versions/${workspaceId}/${pageId}/1.md`,
+      sourceEtag: "",
+      contentHash,
+      authorId: ownerId,
+      reason: "create" as const,
+      createdAt: exportedAt,
+      bodyBytes,
+      file: `versions/stage-version-${id}.md`,
+    };
+    const storedVersion = await env.FILES.put(version.sourceKey, body, {
+      customMetadata: { content_hash: contentHash },
+    });
+    version.sourceEtag = storedVersion.etag;
     const manifest = buildPortableManifest(
       {
         exportId: id,
@@ -173,6 +204,7 @@ describe("portable export archive streaming", () => {
             updatedAt: exportedAt,
           },
         ],
+        versions: [version],
         pages: [page],
         assets: [],
         acl: [],
@@ -187,6 +219,7 @@ describe("portable export archive streaming", () => {
     );
     const zip = planStoredZip([
       { name: page.file, size: bodyBytes },
+      { name: version.file, size: bodyBytes },
       {
         name: "manifest.json",
         size: new TextEncoder().encode(manifest).byteLength,
@@ -213,6 +246,7 @@ describe("portable export archive streaming", () => {
           updatedAt: exportedAt,
         },
       ],
+      versions: [version],
       pages: [page],
       assets: [],
       acl: [],
@@ -222,7 +256,7 @@ describe("portable export archive streaming", () => {
       aliases: [],
       comments: [],
       zip,
-      groups: [{ start: 0, end: 2 }],
+      groups: [{ start: 0, end: 3 }],
     };
     await env.DB.batch([
       env.DB.prepare(
@@ -246,6 +280,19 @@ describe("portable export archive streaming", () => {
         page.slug,
         page.title,
         body,
+        contentHash,
+        ownerId,
+        exportedAt,
+      ),
+      env.DB.prepare(
+        `INSERT INTO page_versions (
+           id, page_id, revision, r2_key, content_hash, author_id, reason,
+           storage_status, created_at
+         ) VALUES (?1, ?2, 1, ?3, ?4, ?5, 'create', 'ready', ?6)`,
+      ).bind(
+        version.id,
+        pageId,
+        version.sourceKey,
         contentHash,
         ownerId,
         exportedAt,
@@ -276,9 +323,14 @@ describe("portable export archive streaming", () => {
 
       expect(object.size).toBe(zip.archiveSize);
       expect(new TextDecoder().decode(extracted[page.file])).toBe(body);
+      expect(new TextDecoder().decode(extracted[version.file])).toBe(body);
       expect(extracted["manifest.json"]).toBeDefined();
     } finally {
-      await env.FILES.delete([planKey, `${prefix}staging/00001.bin`]);
+      await env.FILES.delete([
+        planKey,
+        version.sourceKey,
+        `${prefix}staging/00001.bin`,
+      ]);
       await env.DB.prepare("DELETE FROM workspaces WHERE id = ?1")
         .bind(workspaceId)
         .run();

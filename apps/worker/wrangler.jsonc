@@ -6,7 +6,11 @@
   "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
   "observability": {
     "enabled": true,
-    "head_sampling_rate": 1
+    "head_sampling_rate": 1,
+  },
+  "limits": {
+    "cpu_ms": 300000,
+    "subrequests": 10000,
   },
   "assets": {
     "directory": "../web/dist",
@@ -33,25 +37,25 @@
     "GOOGLE_PICKER_API_KEY": "configure-in-environment",
     "GOOGLE_CLOUD_PROJECT_NUMBER": "configure-in-environment",
     "MCP_PUBLIC_ORIGIN": "http://localhost:8787",
-    "WORKER_INTERNAL_URL": "http://localhost:8787"
+    "WORKER_INTERNAL_URL": "http://localhost:8787",
   },
   "durable_objects": {
     "bindings": [
       {
         "name": "PAGE_ROOM",
-        "class_name": "PageRoom"
+        "class_name": "PageRoom",
       },
       {
         "name": "DISCORD_GATEWAY",
-        "class_name": "DiscordGatewayContainer"
-      }
-    ]
+        "class_name": "DiscordGatewayContainer",
+      },
+    ],
   },
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["PageRoom", "DiscordGatewayContainer"]
-    }
+      "new_sqlite_classes": ["PageRoom", "DiscordGatewayContainer"],
+    },
   ],
   "containers": [
     {
@@ -60,8 +64,8 @@
       "image": "../discord-bot/Dockerfile",
       "image_build_context": "../..",
       "instance_type": "lite",
-      "max_instances": 1
-    }
+      "max_instances": 1,
+    },
   ],
   "env": {
     "production": {
@@ -157,38 +161,38 @@
   "kv_namespaces": [
     {
       "binding": "OAUTH_KV",
-      "id": "00000000000000000000000000000000"
-    }
+      "id": "00000000000000000000000000000000",
+    },
   ],
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "nago-wiki-dev",
       "database_id": "00000000-0000-0000-0000-000000000000",
-      "migrations_dir": "../../migrations"
-    }
+      "migrations_dir": "../../migrations",
+    },
   ],
   "r2_buckets": [
     {
       "binding": "FILES",
-      "bucket_name": "nago-wiki-files-dev"
-    }
+      "bucket_name": "nago-wiki-files-dev",
+    },
   ],
   "ai": {
-    "binding": "AI"
+    "binding": "AI",
   },
   "ai_search": [
     {
       "binding": "WIKI_SEARCH",
-      "instance_name": "nago-wiki-dev"
-    }
+      "instance_name": "nago-wiki-dev",
+    },
   ],
   "queues": {
     "producers": [
       {
         "binding": "ASYNC_JOBS",
-        "queue": "nago-wiki-jobs-dev"
-      }
+        "queue": "nago-wiki-jobs-dev",
+      },
     ],
     "consumers": [
       {
@@ -196,24 +200,24 @@
         "max_batch_size": 10,
         "max_batch_timeout": 5,
         "max_retries": 3,
-        "dead_letter_queue": "nago-wiki-jobs-dlq-dev"
-      }
-    ]
+        "dead_letter_queue": "nago-wiki-jobs-dlq-dev",
+      },
+    ],
   },
   "workflows": [
     {
       "name": "nago-wiki-import-dev",
       "binding": "IMPORT_WORKFLOW",
-      "class_name": "ImportWorkflow"
+      "class_name": "ImportWorkflow",
     },
     {
       "name": "nago-wiki-export-dev",
       "binding": "EXPORT_WORKFLOW",
       "class_name": "ExportWorkflow",
-      "limits": { "steps": 25000 }
-    }
+      "limits": { "steps": 25000 },
+    },
   ],
   "triggers": {
-    "crons": ["*/1 * * * *", "0 18 * * 6"]
-  }
+    "crons": ["*/1 * * * *", "0 18 * * 6", "0 19 * * *"],
+  },
 }

@@ -122,8 +122,18 @@ describe("stored ZIP writer", () => {
 
     expect(plan.parts).toHaveLength(10_000);
     expect(plan.partSize).toBeGreaterThan(5 * 1024 * 1024);
-    expect(plan.parts.slice(0, -1).every((part) => part.size === plan.partSize)).toBe(
-      true,
+    expect(
+      plan.parts.slice(0, -1).every((part) => part.size === plan.partSize),
+    ).toBe(true);
+  });
+
+  it("rejects archives above the R2 object size limit", () => {
+    const maximumR2Object =
+      5 * 1024 * 1024 * 1024 * 1024 - 5 * 1024 * 1024 * 1024;
+
+    expect(planR2MultipartUpload(maximumR2Object).parts).toHaveLength(10_000);
+    expect(() => planR2MultipartUpload(maximumR2Object + 1)).toThrow(
+      "R2 object size limit",
     );
   });
 });

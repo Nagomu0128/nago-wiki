@@ -9,8 +9,10 @@ const ZIP64_END_OF_CENTRAL_DIRECTORY_LOCATOR_SIGNATURE = 0x07064b50;
 const UTF8_WITH_DATA_DESCRIPTOR = 0x0808;
 const ZIP32_MAX = 0xffff_ffffn;
 const R2_MIN_MULTIPART_PART_BYTES = 5 * 1024 * 1024;
-const R2_MAX_MULTIPART_PART_BYTES = 5 * 1024 * 1024 * 1024;
+const R2_MAX_MULTIPART_PART_BYTES = 5 * 1024 * 1024 * 1024 - 5 * 1024 * 1024;
 const R2_MAX_MULTIPART_PARTS = 10_000;
+const R2_MAX_OBJECT_BYTES =
+  5 * 1024 * 1024 * 1024 * 1024 - 5 * 1024 * 1024 * 1024;
 
 export interface ZipEntryPlan {
   name: string;
@@ -35,15 +37,17 @@ export interface MultipartUploadPlan {
   parts: MultipartPartPlan[];
 }
 
-export function planR2MultipartUpload(archiveSize: number): MultipartUploadPlan {
+export function planR2MultipartUpload(
+  archiveSize: number,
+): MultipartUploadPlan {
   if (!Number.isSafeInteger(archiveSize) || archiveSize <= 0) {
     throw new Error("Multipart archive size must be a positive safe integer");
   }
+  if (archiveSize > R2_MAX_OBJECT_BYTES) {
+    throw new Error("Export archive exceeds the R2 object size limit");
+  }
   const requiredPartSize = Math.ceil(archiveSize / R2_MAX_MULTIPART_PARTS);
-  const partSize = Math.max(
-    R2_MIN_MULTIPART_PART_BYTES,
-    requiredPartSize,
-  );
+  const partSize = Math.max(R2_MIN_MULTIPART_PART_BYTES, requiredPartSize);
   if (partSize > R2_MAX_MULTIPART_PART_BYTES) {
     throw new Error("Export archive exceeds the multipart upload limit");
   }
