@@ -238,14 +238,10 @@ export function createImportRoutes(): Hono<ImportApi> {
       requestedBy: userId,
       source: prepared.workflowSource,
     };
-    try {
-      await createImportWorkflow(context.env.IMPORT_WORKFLOW, parameters);
-    } catch (error) {
-      // Keep the durable intent queued. A retry with the same idempotency key
-      // can distinguish an existing instance from an instance that was never
-      // created, even when the original create response was lost.
-      throw error;
-    }
+    // Keep the durable intent queued when creation fails. A retry with the same
+    // idempotency key can distinguish an existing instance from an instance
+    // that was never created, even when the original create response was lost.
+    await createImportWorkflow(context.env.IMPORT_WORKFLOW, parameters);
     return context.json(
       {
         id: importId,
