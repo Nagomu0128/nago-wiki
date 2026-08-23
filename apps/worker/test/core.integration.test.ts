@@ -499,6 +499,89 @@ describe("D1 wiki core", () => {
     expect(identityCount?.count).toBe(1);
   });
 
+  it("race-safely promotes only the configured initial owner", async () => {
+    await resetDatabase();
+    const claims = {
+      aud: "audience",
+      email: " Initial.Owner@Example.com ",
+      exp: 2_000_000_000,
+      iss: "https://team.cloudflareaccess.com",
+      name: "Initial Owner",
+      sub: "initial-owner-subject",
+    };
+
+    const [first, second] = await Promise.all([
+      repository.resolveAccessIdentity(
+        claims,
+        DEFAULT_WORKSPACE_ID,
+        "initial.owner@example.com",
+      ),
+      repository.resolveAccessIdentity(
+        claims,
+        DEFAULT_WORKSPACE_ID,
+        "INITIAL.OWNER@example.com",
+      ),
+    ]);
+
+    expect(first).toMatchObject({ role: "owner", status: "active" });
+    expect(second).toMatchObject({ id: first.id, role: "owner", status: "active" });
+    const counts = await env.DB.prepare(
+      `SELECT
+         count(*) AS user_count,
+         sum(CASE WHEN role = 'owner' AND status = 'active' THEN 1 ELSE 0 END) AS owner_count
+       FROM users
+       WHERE workspace_id = ?1`,
+    )
+      .bind(DEFAULT_WORKSPACE_ID)
+      .first<{ user_count: number; owner_count: number }>();
+    expect(counts).toEqual({ user_count: 1, owner_count: 1 });
+  });
+
+  it("can recover a previously provisioned viewer when no owner exists", async () => {
+    await resetDatabase();
+    const claims = {
+      aud: "audience",
+      email: "owner@example.com",
+      exp: 2_000_000_000,
+      iss: "https://team.cloudflareaccess.com",
+      sub: "existing-bootstrap-subject",
+    };
+    const viewerIdentity = await repository.resolveAccessIdentity(claims);
+    const ownerIdentity = await repository.resolveAccessIdentity(
+      claims,
+      DEFAULT_WORKSPACE_ID,
+      "owner@example.com",
+    );
+
+    expect(viewerIdentity.role).toBe("viewer");
+    expect(ownerIdentity).toMatchObject({ id: viewerIdentity.id, role: "owner" });
+  });
+
+  it("does not let role or status changes remove the last active owner", async () => {
+    await expect(
+      env.DB.prepare("UPDATE users SET role = 'editor' WHERE id = ?1")
+        .bind(owner.id)
+        .run(),
+    ).rejects.toThrow(/workspace requires an active owner/u);
+    await expect(
+      env.DB.prepare("UPDATE users SET status = 'suspended' WHERE id = ?1")
+        .bind(owner.id)
+        .run(),
+    ).rejects.toThrow(/workspace requires an active owner/u);
+
+    const secondOwner = await insertUser("owner", "second-owner@example.com");
+    await expect(
+      env.DB.prepare("UPDATE users SET role = 'editor' WHERE id = ?1")
+        .bind(owner.id)
+        .run(),
+    ).resolves.toBeDefined();
+    await expect(
+      env.DB.prepare("UPDATE users SET status = 'suspended' WHERE id = ?1")
+        .bind(secondOwner.id)
+        .run(),
+    ).rejects.toThrow(/workspace requires an active owner/u);
+  });
+
   it("replays page creation idempotently and rejects key reuse", async () => {
     const request = {
       parentId: null,

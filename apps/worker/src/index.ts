@@ -40,6 +40,7 @@ const accessAuthentication = createAccessAuthenticationMiddleware({
     audience: environment.ACCESS_AUDIENCE,
     issuer: environment.ACCESS_ISSUER,
     workspaceId: environment.WORKSPACE_ID,
+    bootstrapOwnerEmail: environment.BOOTSTRAP_OWNER_EMAIL,
     environment: environment.ENVIRONMENT,
     allowDevelopmentIdentity: parseBoolean(environment.ALLOW_DEVELOPMENT_IDENTITY),
   }),

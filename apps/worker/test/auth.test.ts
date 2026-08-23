@@ -35,11 +35,15 @@ const identity: AuthenticatedIdentity = {
 
 class FakeIdentityRepository implements AccessIdentityRepository {
   public claims: AccessJwtClaims | undefined;
+  public bootstrapOwnerEmail: string | undefined;
 
   public resolveAccessIdentity(
     claims: AccessJwtClaims,
+    _workspaceId?: string,
+    bootstrapOwnerEmail?: string,
   ): Promise<AuthenticatedIdentity> {
     this.claims = claims;
+    this.bootstrapOwnerEmail = bootstrapOwnerEmail;
     return Promise.resolve({ ...identity, subject: claims.sub, email: claims.email });
   }
 }
@@ -103,6 +107,32 @@ describe("Access authentication middleware", () => {
 
     expect(response.status).toBe(200);
     expect(repository.claims?.sub).toBe("verified-subject");
+  });
+
+  it("passes the configured bootstrap owner address only to the repository", async () => {
+    const repository = new FakeIdentityRepository();
+    const verifier: AccessJwtVerifier = {
+      verify: () =>
+        Promise.resolve({
+          aud: config.audience,
+          email: "verified@example.com",
+          exp: 2_000_000_000,
+          iss: config.issuer,
+          sub: "verified-subject",
+        }),
+    };
+    const response = await authApp(
+      { ...config, bootstrapOwnerEmail: "owner@example.com" },
+      repository,
+      verifier,
+    ).request(
+      "https://wiki.example/private",
+      { headers: { "Cf-Access-Jwt-Assertion": "signed.jwt.value" } },
+      env,
+    );
+
+    expect(response.status).toBe(200);
+    expect(repository.bootstrapOwnerEmail).toBe("owner@example.com");
   });
 });
 

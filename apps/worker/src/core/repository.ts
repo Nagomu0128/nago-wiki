@@ -154,7 +154,9 @@ export class D1WikiRepository {
   public async resolveAccessIdentity(
     claims: AccessJwtClaims,
     workspaceId = DEFAULT_WORKSPACE_ID,
+    bootstrapOwnerEmail?: string,
   ): Promise<AuthenticatedIdentity> {
+    const normalizedEmail = claims.email.trim().toLocaleLowerCase("en-US");
     const existingIdentity = await this.database
       .prepare(
         `SELECT u.*, e.external_subject
@@ -167,14 +169,28 @@ export class D1WikiRepository {
       .bind(claims.sub, workspaceId)
       .first<IdentityUserRow>();
     if (existingIdentity !== null) {
-      return mapIdentity(existingIdentity, claims);
+      await this.promoteBootstrapOwnerIfEligible(
+        existingIdentity.id,
+        workspaceId,
+        normalizedEmail,
+        bootstrapOwnerEmail,
+      );
+      const currentUser = await this.findIdentityUser(claims.sub, workspaceId);
+      if (currentUser === null) {
+        throw new ApiProblem(
+          "AUTHENTICATION_REQUIRED",
+          401,
+          "The authenticated identity is no longer linked",
+        );
+      }
+      return mapIdentity(currentUser, claims);
     }
 
     let user = await this.database
       .prepare(
         "SELECT * FROM users WHERE workspace_id = ? AND lower(email) = lower(?)",
       )
-      .bind(workspaceId, claims.email)
+      .bind(workspaceId, normalizedEmail)
       .first<UserRow>();
 
     if (user === null) {
@@ -189,7 +205,7 @@ export class D1WikiRepository {
         .bind(
           userId,
           workspaceId,
-          claims.email.trim().toLocaleLowerCase("en-US"),
+          normalizedEmail,
           preferredDisplayName(claims),
           now,
           now,
@@ -199,7 +215,7 @@ export class D1WikiRepository {
         .prepare(
           "SELECT * FROM users WHERE workspace_id = ? AND lower(email) = lower(?)",
         )
-        .bind(workspaceId, claims.email)
+        .bind(workspaceId, normalizedEmail)
         .first<UserRow>();
     }
 
@@ -210,6 +226,13 @@ export class D1WikiRepository {
         "The authenticated user could not be provisioned",
       );
     }
+
+    await this.promoteBootstrapOwnerIfEligible(
+      user.id,
+      workspaceId,
+      normalizedEmail,
+      bootstrapOwnerEmail,
+    );
 
     await this.database
       .prepare(
@@ -237,6 +260,59 @@ export class D1WikiRepository {
       );
     }
     return mapIdentity(linkedUser, claims);
+  }
+
+  private async findIdentityUser(
+    externalSubject: string,
+    workspaceId: string,
+  ): Promise<IdentityUserRow | null> {
+    return this.database
+      .prepare(
+        `SELECT u.*, e.external_subject
+           FROM external_identities e
+           JOIN users u ON u.id = e.user_id
+          WHERE e.provider = 'cloudflare_access'
+            AND e.external_subject = ?
+            AND u.workspace_id = ?`,
+      )
+      .bind(externalSubject, workspaceId)
+      .first<IdentityUserRow>();
+  }
+
+  private async promoteBootstrapOwnerIfEligible(
+    userId: string,
+    workspaceId: string,
+    verifiedEmail: string,
+    configuredEmail?: string,
+  ): Promise<void> {
+    const bootstrapEmail = configuredEmail?.trim().toLocaleLowerCase("en-US");
+    if (
+      bootstrapEmail === undefined ||
+      bootstrapEmail.length === 0 ||
+      verifiedEmail.trim().toLocaleLowerCase("en-US") !== bootstrapEmail
+    ) {
+      return;
+    }
+
+    const now = new Date().toISOString();
+    await this.database
+      .prepare(
+        `UPDATE users
+            SET role = 'owner', status = 'active', updated_at = ?1
+          WHERE id = ?2
+            AND workspace_id = ?3
+            AND lower(email) = ?4
+            AND NOT EXISTS (
+              SELECT 1
+                FROM users AS active_owner
+               WHERE active_owner.workspace_id = ?3
+                 AND active_owner.role = 'owner'
+                 AND active_owner.status = 'active'
+                 AND active_owner.id <> ?2
+            )`,
+      )
+      .bind(now, userId, workspaceId, bootstrapEmail)
+      .run();
   }
 
   public async getPage(pageId: string): Promise<Page | null> {

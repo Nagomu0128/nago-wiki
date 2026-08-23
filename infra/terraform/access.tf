@@ -40,9 +40,14 @@ resource "cloudflare_zero_trust_access_application" "wiki" {
     precondition {
       condition = (
         length(var.access_allowed_emails) > 0 &&
-        var.access_google_identity_provider_id != null
+        var.access_google_identity_provider_id != null &&
+        var.bootstrap_owner_email != null &&
+        contains(
+          [for email in var.access_allowed_emails : lower(trimspace(email))],
+          lower(trimspace(var.bootstrap_owner_email)),
+        )
       )
-      error_message = "access_allowed_emails and access_google_identity_provider_id are required when access_domain is set."
+      error_message = "access_allowed_emails, access_google_identity_provider_id, and an allowlisted bootstrap_owner_email are required when access_domain is set."
     }
   }
 }

@@ -16,6 +16,7 @@ interface __BaseEnv_Env {
 	ACCESS_ISSUER: "https://configure.cloudflareaccess.com";
 	ALLOW_DEVELOPMENT_IDENTITY: "false" | "true";
 	WORKSPACE_ID: "00000000-0000-7000-8000-000000000001";
+	BOOTSTRAP_OWNER_EMAIL: "owner@configure-before-deploy.invalid" | "owner@example.com";
 	GOOGLE_CLIENT_ID: "configure-before-deploy" | "configure-in-environment";
 	GOOGLE_PICKER_API_KEY: "configure-before-deploy" | "configure-in-environment";
 	GOOGLE_CLOUD_PROJECT_NUMBER: "configure-before-deploy" | "configure-in-environment";
@@ -45,6 +46,7 @@ declare namespace Cloudflare {
 		ACCESS_ISSUER: "https://configure.cloudflareaccess.com";
 		ALLOW_DEVELOPMENT_IDENTITY: "false";
 		WORKSPACE_ID: "00000000-0000-7000-8000-000000000001";
+		BOOTSTRAP_OWNER_EMAIL: "owner@configure-before-deploy.invalid";
 		GOOGLE_CLIENT_ID: "configure-before-deploy";
 		GOOGLE_PICKER_API_KEY: "configure-before-deploy";
 		GOOGLE_CLOUD_PROJECT_NUMBER: "configure-before-deploy";
@@ -61,7 +63,7 @@ type StringifyValues<EnvType extends Record<string, unknown>> = {
 	[Binding in keyof EnvType]: EnvType[Binding] extends string ? EnvType[Binding] : string;
 };
 declare namespace NodeJS {
-	interface ProcessEnv extends StringifyValues<Pick<Cloudflare.Env, "ENVIRONMENT" | "AI_GATEWAY_ID" | "ANSWER_MODEL" | "DEFAULT_KNOWLEDGE_MODE" | "ACCESS_AUDIENCE" | "ACCESS_ISSUER" | "ALLOW_DEVELOPMENT_IDENTITY" | "WORKSPACE_ID" | "GOOGLE_CLIENT_ID" | "GOOGLE_PICKER_API_KEY" | "GOOGLE_CLOUD_PROJECT_NUMBER" | "MCP_PUBLIC_ORIGIN" | "WORKER_INTERNAL_URL">> {}
+	interface ProcessEnv extends StringifyValues<Pick<Cloudflare.Env, "ENVIRONMENT" | "AI_GATEWAY_ID" | "ANSWER_MODEL" | "DEFAULT_KNOWLEDGE_MODE" | "ACCESS_AUDIENCE" | "ACCESS_ISSUER" | "ALLOW_DEVELOPMENT_IDENTITY" | "WORKSPACE_ID" | "BOOTSTRAP_OWNER_EMAIL" | "GOOGLE_CLIENT_ID" | "GOOGLE_PICKER_API_KEY" | "GOOGLE_CLOUD_PROJECT_NUMBER" | "MCP_PUBLIC_ORIGIN" | "WORKER_INTERNAL_URL">> {}
 }
 
 // Begin runtime types
