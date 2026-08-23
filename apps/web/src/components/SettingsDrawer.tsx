@@ -165,22 +165,23 @@ function PageAclControl({ api, members, page }: { api: WikiApi; members: AdminMe
     () => members.filter((member) => member.role !== "owner" && member.status === "active"),
     [members],
   );
+  const aclReady = enabled && acl.status === "success" && acl.data.pageId === pageId;
 
   return (
     <section aria-labelledby="acl-heading" className="settings-section">
       <h3 id="acl-heading">選択中ページのアクセス</h3>
       {!page && <p className="settings-muted">ページを選択してください。</p>}
       {page && !enabled && <p className="settings-muted">このページはWorkspace公開です。ACLはrestrictedページで設定できます。</p>}
-      {acl.status === "loading" && <p className="settings-muted">ACLを読み込み中…</p>}
-      {acl.status === "error" && <SettingsError error={acl.error} />}
-      {acl.status === "success" && (
+      {enabled && !aclReady && acl.status !== "error" && <p className="settings-muted">ACLを読み込み中…</p>}
+      {enabled && acl.status === "error" && <SettingsError error={acl.error} />}
+      {aclReady && (
         <AclEditor
           acl={acl.data}
           api={api}
           key={`${acl.data.pageId}:${String(acl.data.revision)}`}
           members={eligibleMembers}
           onSaved={acl.refetch}
-          pageTitle={page?.page.title ?? "選択中のページ"}
+          pageTitle={page.page.title}
         />
       )}
     </section>

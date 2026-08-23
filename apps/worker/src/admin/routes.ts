@@ -1,6 +1,7 @@
 import {
   botProviderSchema,
   createBotChannelRequestSchema,
+  externalBotChannelIdSchema,
   replacePageAclRequestSchema,
   updateAdminMemberRequestSchema,
   updateBotChannelRequestSchema,
@@ -79,12 +80,13 @@ export function createAdminRoutes(): Hono<CoreHonoEnv> {
 
   routes.patch("/admin/bot-channels/:provider/:channelId", async (context) => {
     const provider = botProviderSchema.safeParse(context.req.param("provider"));
+    const channelId = externalBotChannelIdSchema.safeParse(context.req.param("channelId"));
     const request = updateBotChannelRequestSchema.safeParse(await readJson(context.req.raw));
-    if (!provider.success || !request.success) throw invalidRequest("Invalid bot channel update");
+    if (!provider.success || !channelId.success || !request.success) throw invalidRequest("Invalid bot channel update");
     const channel = await service(context).updateBotChannel(
       requireIdentity(context),
       provider.data,
-      context.req.param("channelId"),
+      channelId.data,
       request.data,
     );
     return context.json({ channel });
@@ -92,11 +94,12 @@ export function createAdminRoutes(): Hono<CoreHonoEnv> {
 
   routes.delete("/admin/bot-channels/:provider/:channelId", async (context) => {
     const provider = botProviderSchema.safeParse(context.req.param("provider"));
-    if (!provider.success) throw invalidRequest("Invalid bot provider");
+    const channelId = externalBotChannelIdSchema.safeParse(context.req.param("channelId"));
+    if (!provider.success || !channelId.success) throw invalidRequest("Invalid bot channel");
     await service(context).deleteBotChannel(
       requireIdentity(context),
       provider.data,
-      context.req.param("channelId"),
+      channelId.data,
     );
     return context.body(null, 204);
   });

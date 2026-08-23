@@ -474,7 +474,7 @@ export class FixtureWikiApi implements WikiApi {
         if (setting.provider !== provider || channel.externalChannelId !== externalChannelId) return channel;
         updated = {
           ...channel,
-          displayName: input.displayName ?? channel.displayName,
+          displayName: input.displayName === undefined ? channel.displayName : input.displayName,
           enabled: input.enabled ?? channel.enabled,
           updatedAt: new Date().toISOString(),
         };
