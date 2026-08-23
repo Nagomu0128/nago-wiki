@@ -17,6 +17,15 @@ import type {
   WikiApi,
   WikiPage,
   BotProvider,
+  AdminMember,
+  BotChannel,
+  BotProviderSettings,
+  CreateBotChannelRequest,
+  LinkedBotAccount,
+  PageAclResponse,
+  ReplacePageAclRequest,
+  UpdateAdminMemberRequest,
+  UpdateBotChannelRequest,
 } from "./types";
 
 const ids = {
@@ -109,6 +118,34 @@ export class FixtureWikiApi implements WikiApi {
   private readonly pages = new Map(initialPages.map((resource) => [resource.page.id, clone(resource)]));
   private readonly comments = new Map<string, PageComment[]>();
   private readonly imports = new Map<string, ImportJob>();
+  private readonly adminMembers: AdminMember[] = [
+    {
+      id: ids.user,
+      email: "nagomu@example.com",
+      displayName: "Nagomu",
+      role: "owner",
+      status: "active",
+      linkedBotProviders: [],
+      createdAt: now,
+      updatedAt: now,
+    },
+    {
+      id: "20000000-0000-4000-8000-000000000002",
+      email: "editor@example.com",
+      displayName: "Editor",
+      role: "editor",
+      status: "active",
+      linkedBotProviders: ["discord"],
+      createdAt: now,
+      updatedAt: now,
+    },
+  ];
+  private linkedBotAccounts: LinkedBotAccount[] = [];
+  private botSettings: BotProviderSettings[] = [
+    { provider: "discord", enabled: true, channels: [] },
+    { provider: "line", enabled: true, channels: [] },
+  ];
+  private readonly pageAcls = new Map<string, PageAclResponse>();
 
   async getMe(signal?: AbortSignal): Promise<MeResponse> {
     await abortableDelay(signal);
@@ -337,5 +374,124 @@ export class FixtureWikiApi implements WikiApi {
       code: "fixture-link-code",
       expiresAt: new Date(Date.now() + 10 * 60_000).toISOString(),
     };
+  }
+
+  async getLinkedBotAccounts(signal?: AbortSignal) {
+    await abortableDelay(signal);
+    return clone(this.linkedBotAccounts);
+  }
+
+  async unlinkBotAccount(provider: BotProvider, signal?: AbortSignal) {
+    await abortableDelay(signal);
+    this.linkedBotAccounts = this.linkedBotAccounts.filter((account) => account.provider !== provider);
+  }
+
+  async getAdminMembers(signal?: AbortSignal) {
+    await abortableDelay(signal);
+    return clone(this.adminMembers);
+  }
+
+  async updateAdminMember(id: string, input: UpdateAdminMemberRequest, signal?: AbortSignal) {
+    await abortableDelay(signal);
+    const member = this.adminMembers.find((candidate) => candidate.id === id);
+    if (!member) throw new Error("Member not found");
+    member.role = input.role ?? member.role;
+    member.status = input.status ?? member.status;
+    member.updatedAt = new Date().toISOString();
+    return clone(member);
+  }
+
+  async getPageAcl(pageId: string, signal?: AbortSignal) {
+    await abortableDelay(signal);
+    return clone(this.pageAcls.get(pageId) ?? {
+      pageId,
+      revision: 0,
+      updatedAt: null,
+      entries: [],
+    });
+  }
+
+  async replacePageAcl(pageId: string, input: ReplacePageAclRequest, signal?: AbortSignal) {
+    await abortableDelay(signal);
+    const entries = input.entries.map((entry) => {
+      const member = this.adminMembers.find((candidate) => candidate.id === entry.userId);
+      if (!member) throw new Error("Member not found");
+      return { ...entry, displayName: member.displayName, email: member.email };
+    });
+    const acl: PageAclResponse = {
+      pageId,
+      revision: input.baseRevision + 1,
+      updatedAt: new Date().toISOString(),
+      entries,
+    };
+    this.pageAcls.set(pageId, acl);
+    return clone(acl);
+  }
+
+  async getBotSettings(signal?: AbortSignal) {
+    await abortableDelay(signal);
+    return clone(this.botSettings);
+  }
+
+  async setBotProviderEnabled(provider: BotProvider, enabled: boolean, signal?: AbortSignal) {
+    await abortableDelay(signal);
+    this.botSettings = this.botSettings.map((setting) =>
+      setting.provider === provider ? { ...setting, enabled } : setting,
+    );
+    return clone(this.botSettings);
+  }
+
+  async createBotChannel(input: CreateBotChannelRequest, signal?: AbortSignal) {
+    await abortableDelay(signal);
+    const timestamp = new Date().toISOString();
+    const channel: BotChannel = {
+      provider: input.provider,
+      externalChannelId: input.externalChannelId,
+      displayName: input.displayName ?? null,
+      enabled: input.enabled,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    this.botSettings = this.botSettings.map((setting) =>
+      setting.provider === input.provider
+        ? { ...setting, channels: [...setting.channels, channel] }
+        : setting,
+    );
+    return clone(channel);
+  }
+
+  async updateBotChannel(
+    provider: BotProvider,
+    externalChannelId: string,
+    input: UpdateBotChannelRequest,
+    signal?: AbortSignal,
+  ) {
+    await abortableDelay(signal);
+    let updated: BotChannel | undefined;
+    this.botSettings = this.botSettings.map((setting) => ({
+      ...setting,
+      channels: setting.channels.map((channel) => {
+        if (setting.provider !== provider || channel.externalChannelId !== externalChannelId) return channel;
+        updated = {
+          ...channel,
+          displayName: input.displayName ?? channel.displayName,
+          enabled: input.enabled ?? channel.enabled,
+          updatedAt: new Date().toISOString(),
+        };
+        return updated;
+      }),
+    }));
+    if (!updated) throw new Error("Channel not found");
+    return clone(updated);
+  }
+
+  async deleteBotChannel(provider: BotProvider, externalChannelId: string, signal?: AbortSignal) {
+    await abortableDelay(signal);
+    this.botSettings = this.botSettings.map((setting) => ({
+      ...setting,
+      channels: setting.provider === provider
+        ? setting.channels.filter((channel) => channel.externalChannelId !== externalChannelId)
+        : setting.channels,
+    }));
   }
 }

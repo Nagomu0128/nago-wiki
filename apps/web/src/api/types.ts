@@ -206,4 +206,39 @@ export interface WikiApi {
   getImport(id: string, signal?: AbortSignal): Promise<ImportJob>;
   applyImport(id: string, input: ApplyImportInput, signal?: AbortSignal): Promise<PageResource>;
   createAccountLink(provider: BotProvider, signal?: AbortSignal): Promise<AccountLinkCode>;
+  getLinkedBotAccounts(signal?: AbortSignal): Promise<LinkedBotAccount[]>;
+  unlinkBotAccount(provider: BotProvider, signal?: AbortSignal): Promise<void>;
+  getAdminMembers(signal?: AbortSignal): Promise<AdminMember[]>;
+  updateAdminMember(id: string, input: UpdateAdminMemberRequest, signal?: AbortSignal): Promise<AdminMember>;
+  getPageAcl(pageId: string, signal?: AbortSignal): Promise<PageAclResponse>;
+  replacePageAcl(pageId: string, input: ReplacePageAclRequest, signal?: AbortSignal): Promise<PageAclResponse>;
+  getBotSettings(signal?: AbortSignal): Promise<BotProviderSettings[]>;
+  setBotProviderEnabled(provider: BotProvider, enabled: boolean, signal?: AbortSignal): Promise<BotProviderSettings[]>;
+  createBotChannel(input: CreateBotChannelRequest, signal?: AbortSignal): Promise<BotChannel>;
+  updateBotChannel(provider: BotProvider, externalChannelId: string, input: UpdateBotChannelRequest, signal?: AbortSignal): Promise<BotChannel>;
+  deleteBotChannel(provider: BotProvider, externalChannelId: string, signal?: AbortSignal): Promise<void>;
 }
+import type {
+  AdminMember,
+  BotChannel,
+  BotProviderSettings,
+  CreateBotChannelRequest,
+  LinkedBotAccount,
+  PageAclResponse,
+  ReplacePageAclRequest,
+  UpdateAdminMemberRequest,
+  UpdateBotChannelRequest,
+} from "@nago-wiki/shared";
+
+export type {
+  AdminMember,
+  BotChannel,
+  BotProviderSettings,
+  CreateBotChannelRequest,
+  LinkedBotAccount,
+  PageAclPermission,
+  PageAclResponse,
+  ReplacePageAclRequest,
+  UpdateAdminMemberRequest,
+  UpdateBotChannelRequest,
+} from "@nago-wiki/shared";

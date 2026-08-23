@@ -17,6 +17,15 @@ import type {
   UpdatePageInput,
   WikiApi,
   BotProvider,
+  AdminMember,
+  BotChannel,
+  BotProviderSettings,
+  CreateBotChannelRequest,
+  LinkedBotAccount,
+  PageAclResponse,
+  ReplacePageAclRequest,
+  UpdateAdminMemberRequest,
+  UpdateBotChannelRequest,
 } from "./types";
 
 export class ApiFailure extends Error {
@@ -204,5 +213,96 @@ export class HttpWikiApi implements WikiApi {
       body: JSON.stringify({ provider }),
       signal: signal ?? null,
     });
+  }
+
+  async getLinkedBotAccounts(signal?: AbortSignal) {
+    const response = await this.request<{ accounts: LinkedBotAccount[] }>("/account-links", {
+      signal: signal ?? null,
+    });
+    return response.accounts;
+  }
+
+  async unlinkBotAccount(provider: BotProvider, signal?: AbortSignal) {
+    await this.request<unknown>(`/account-links/${encodeURIComponent(provider)}`, {
+      method: "DELETE",
+      signal: signal ?? null,
+    });
+  }
+
+  async getAdminMembers(signal?: AbortSignal) {
+    const response = await this.request<{ members: AdminMember[] }>("/admin/members", {
+      signal: signal ?? null,
+    });
+    return response.members;
+  }
+
+  async updateAdminMember(id: string, input: UpdateAdminMemberRequest, signal?: AbortSignal) {
+    const response = await this.request<{ member: AdminMember }>(
+      `/admin/members/${encodeURIComponent(id)}`,
+      { method: "PATCH", body: JSON.stringify(input), signal: signal ?? null },
+    );
+    return response.member;
+  }
+
+  getPageAcl(pageId: string, signal?: AbortSignal) {
+    return this.request<PageAclResponse>(`/pages/${encodeURIComponent(pageId)}/acl`, {
+      signal: signal ?? null,
+    });
+  }
+
+  replacePageAcl(pageId: string, input: ReplacePageAclRequest, signal?: AbortSignal) {
+    return this.request<PageAclResponse>(`/pages/${encodeURIComponent(pageId)}/acl`, {
+      method: "PUT",
+      body: JSON.stringify(input),
+      signal: signal ?? null,
+    });
+  }
+
+  async getBotSettings(signal?: AbortSignal) {
+    const response = await this.request<{ providers: BotProviderSettings[] }>("/admin/bots", {
+      signal: signal ?? null,
+    });
+    return response.providers;
+  }
+
+  async setBotProviderEnabled(provider: BotProvider, enabled: boolean, signal?: AbortSignal) {
+    const response = await this.request<{ providers: BotProviderSettings[] }>(
+      `/admin/bots/${encodeURIComponent(provider)}`,
+      { method: "PUT", body: JSON.stringify({ enabled }), signal: signal ?? null },
+    );
+    return response.providers;
+  }
+
+  async createBotChannel(input: CreateBotChannelRequest, signal?: AbortSignal) {
+    const response = await this.request<{ channel: BotChannel }>("/admin/bot-channels", {
+      method: "POST",
+      body: JSON.stringify(input),
+      signal: signal ?? null,
+    });
+    return response.channel;
+  }
+
+  async updateBotChannel(
+    provider: BotProvider,
+    externalChannelId: string,
+    input: UpdateBotChannelRequest,
+    signal?: AbortSignal,
+  ) {
+    const response = await this.request<{ channel: BotChannel }>(
+      `/admin/bot-channels/${encodeURIComponent(provider)}/${encodeURIComponent(externalChannelId)}`,
+      { method: "PATCH", body: JSON.stringify(input), signal: signal ?? null },
+    );
+    return response.channel;
+  }
+
+  async deleteBotChannel(
+    provider: BotProvider,
+    externalChannelId: string,
+    signal?: AbortSignal,
+  ) {
+    await this.request<unknown>(
+      `/admin/bot-channels/${encodeURIComponent(provider)}/${encodeURIComponent(externalChannelId)}`,
+      { method: "DELETE", signal: signal ?? null },
+    );
   }
 }

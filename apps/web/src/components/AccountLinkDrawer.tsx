@@ -3,6 +3,7 @@ import { useApiMutation, type BotProvider, type WikiApi } from "../api";
 
 interface AccountLinkDrawerProps {
   api: WikiApi;
+  compact?: boolean;
 }
 
 const providerNames: Record<BotProvider, string> = {
@@ -14,7 +15,7 @@ function formatExpiry(value: string) {
   return new Intl.DateTimeFormat("ja-JP", { timeStyle: "short" }).format(new Date(value));
 }
 
-export function AccountLinkDrawer({ api }: AccountLinkDrawerProps) {
+export function AccountLinkDrawer({ api, compact = false }: AccountLinkDrawerProps) {
   const [provider, setProvider] = useState<BotProvider>("discord");
   const [copied, setCopied] = useState(false);
   const link = useApiMutation((selected: BotProvider, signal) => api.createAccountLink(selected, signal));
@@ -31,12 +32,12 @@ export function AccountLinkDrawer({ api }: AccountLinkDrawerProps) {
   };
 
   return (
-    <div className="account-link-panel">
-      <div className="drawer-section-title">
+    <div className={compact ? "account-link-compact" : "account-link-panel"}>
+      {!compact && <div className="drawer-section-title">
         <span>Connected assistants</span>
         <h2>Botアカウント連携</h2>
         <p>DiscordまたはLINEからWikiの知識へ、安全に質問できるようにします。</p>
-      </div>
+      </div>}
 
       <fieldset className="account-link-providers">
         <legend>連携先</legend>
