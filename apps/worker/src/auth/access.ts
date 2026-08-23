@@ -19,6 +19,7 @@ export interface AccessAuthenticationConfig {
   issuer: string;
   jwksUrl?: string;
   workspaceId?: string;
+  bootstrapOwnerEmail?: string;
   environment: string;
   allowDevelopmentIdentity?: boolean;
 }
@@ -33,6 +34,7 @@ export interface AccessIdentityRepository {
   resolveAccessIdentity(
     claims: AccessJwtClaims,
     workspaceId?: string,
+    bootstrapOwnerEmail?: string,
   ): Promise<AuthenticatedIdentity>;
 }
 
@@ -63,6 +65,7 @@ export function createAccessAuthenticationMiddleware(
     const identity = await repository.resolveAccessIdentity(
       claims,
       config.workspaceId ?? DEFAULT_WORKSPACE_ID,
+      config.bootstrapOwnerEmail,
     );
     if (identity.status !== "active") {
       throw new ApiProblem("FORBIDDEN", 403, "This account is suspended");

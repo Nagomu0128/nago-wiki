@@ -51,6 +51,22 @@ variable "access_allowed_emails" {
   }
 }
 
+variable "bootstrap_owner_email" {
+  description = "Verified email promoted to the first active workspace owner. Required when Access is configured."
+  type        = string
+  default     = null
+  nullable    = true
+  sensitive   = true
+
+  validation {
+    condition = (
+      var.bootstrap_owner_email == null ||
+      can(regex("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$", var.bootstrap_owner_email))
+    )
+    error_message = "bootstrap_owner_email must be an email address."
+  }
+}
+
 variable "access_google_identity_provider_id" {
   description = "Cloudflare Access Google identity provider UUID."
   type        = string

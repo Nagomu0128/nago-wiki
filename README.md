@@ -24,6 +24,10 @@ both HTTP API calls and realtime WebSocket upgrades. Production uses
 
 Cloudflare resource IDやOAuth secretはrepositoryへ保存しません。local secretは`.dev.vars`、production secretはWrangler SecretsまたはSecrets Storeを使用します。
 
+初回Ownerは、検証済みCloudflare Accessメールアドレスと
+`BOOTSTRAP_OWNER_EMAIL` が一致した場合のみ作成されます。本番placeholderを
+実際のAccess allowlist内のメールアドレスへ置換してからdeployしてください。
+
 ## Provisioning
 
 Cloudflare account-level resources are managed under [`infra/terraform`](./infra/terraform). The Worker, Durable Objects, Workflows, Queue consumer, and Discord Container are deployed from [`apps/worker/wrangler.jsonc`](./apps/worker/wrangler.jsonc). See the infrastructure README for the provisioning order and required secrets.
