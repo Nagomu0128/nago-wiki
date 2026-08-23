@@ -44,7 +44,7 @@ resource "cloudflare_zero_trust_access_application" "wiki" {
         var.bootstrap_owner_email != null &&
         contains(
           [for email in var.access_allowed_emails : lower(trimspace(email))],
-          lower(trimspace(var.bootstrap_owner_email)),
+          try(lower(trimspace(var.bootstrap_owner_email)), ""),
         )
       )
       error_message = "access_allowed_emails, access_google_identity_provider_id, and an allowlisted bootstrap_owner_email are required when access_domain is set."
