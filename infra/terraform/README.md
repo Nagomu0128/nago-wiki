@@ -11,6 +11,14 @@ terraform apply nago-wiki.tfplan
 terraform output
 ```
 
+To manage Cloudflare Access in the same state, set `access_domain`,
+`access_allowed_emails`, and `access_google_identity_provider_id`. The root Web
+application is restricted to the exact email allowlist and Google IdP. MCP/OAuth,
+the LINE webhook, and Discord bridge paths receive narrower Access bypass
+applications because those endpoints enforce bearer tokens or request signatures.
+Copy the `access_application_audience` output into the production
+`ACCESS_AUDIENCE` Worker variable.
+
 Copy the resulting D1, KV, R2, Queue, AI Search, and AI Gateway identifiers into the `production` environment of `apps/worker/wrangler.jsonc`; the all-zero IDs are intentional non-deployable placeholders. Set `ACCESS_AUDIENCE`, `ACCESS_ISSUER`, `GOOGLE_CLIENT_ID`, `MCP_PUBLIC_ORIGIN`, `WORKER_INTERNAL_URL`, `WORKSPACE_ID`, and `ALLOW_DEVELOPMENT_IDENTITY=false` as non-secret production vars. Do not put secrets in Terraform state or committed Wrangler vars. Register only these values with `wrangler secret put --env production`:
 
 ```text

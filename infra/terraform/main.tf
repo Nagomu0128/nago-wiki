@@ -52,6 +52,7 @@ resource "cloudflare_ai_gateway" "wiki" {
     rules = [
       {
         enabled    = true
+        id         = "workspace-monthly"
         limit      = var.ai_monthly_budget_usd
         limit_type = "cost"
         technique  = "fixed"
@@ -59,6 +60,7 @@ resource "cloudflare_ai_gateway" "wiki" {
       },
       {
         enabled    = true
+        id         = "user-monthly"
         limit      = var.ai_user_monthly_budget_usd
         limit_type = "cost"
         technique  = "fixed"

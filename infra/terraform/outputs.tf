@@ -25,3 +25,8 @@ output "ai_search_instance_name" {
 output "ai_gateway_id" {
   value = cloudflare_ai_gateway.wiki.id
 }
+
+output "access_application_audience" {
+  description = "Copy this value to ACCESS_AUDIENCE after Access is enabled."
+  value       = try(cloudflare_zero_trust_access_application.wiki[0].aud, null)
+}

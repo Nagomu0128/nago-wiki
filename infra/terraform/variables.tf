@@ -21,6 +21,51 @@ variable "d1_primary_location" {
   default     = "apac"
 }
 
+variable "access_domain" {
+  description = "Hostname protected by Cloudflare Access, without a URL scheme. Null skips Access creation."
+  type        = string
+  default     = null
+  nullable    = true
+
+  validation {
+    condition = (
+      var.access_domain == null ||
+      can(regex("^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$", var.access_domain))
+    )
+    error_message = "access_domain must be a lowercase hostname without a scheme or path."
+  }
+}
+
+variable "access_allowed_emails" {
+  description = "Exact verified email addresses allowed into the private wiki."
+  type        = set(string)
+  default     = []
+  sensitive   = true
+
+  validation {
+    condition = alltrue([
+      for email in var.access_allowed_emails :
+      can(regex("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$", email))
+    ])
+    error_message = "Every access_allowed_emails value must be an email address."
+  }
+}
+
+variable "access_google_identity_provider_id" {
+  description = "Cloudflare Access Google identity provider UUID."
+  type        = string
+  default     = null
+  nullable    = true
+
+  validation {
+    condition = (
+      var.access_google_identity_provider_id == null ||
+      can(regex("^[0-9a-fA-F-]{32,36}$", var.access_google_identity_provider_id))
+    )
+    error_message = "access_google_identity_provider_id must be a Cloudflare Access IdP UUID."
+  }
+}
+
 variable "ai_monthly_budget_usd" {
   description = "Monthly workspace-wide AI Gateway spend limit in USD."
   type        = number
