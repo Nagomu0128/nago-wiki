@@ -29,6 +29,8 @@
     "ALLOW_DEVELOPMENT_IDENTITY": "true",
     "WORKSPACE_ID": "00000000-0000-7000-8000-000000000001",
     "GOOGLE_CLIENT_ID": "configure-in-environment",
+    "GOOGLE_PICKER_API_KEY": "configure-in-environment",
+    "GOOGLE_CLOUD_PROJECT_NUMBER": "configure-in-environment",
     "MCP_PUBLIC_ORIGIN": "http://localhost:8787",
     "WORKER_INTERNAL_URL": "http://localhost:8787"
   },
@@ -73,6 +75,8 @@
         "ALLOW_DEVELOPMENT_IDENTITY": "false",
         "WORKSPACE_ID": "00000000-0000-7000-8000-000000000001",
         "GOOGLE_CLIENT_ID": "configure-before-deploy",
+        "GOOGLE_PICKER_API_KEY": "configure-before-deploy",
+        "GOOGLE_CLOUD_PROJECT_NUMBER": "configure-before-deploy",
         "MCP_PUBLIC_ORIGIN": "https://configure-before-deploy.example",
         "WORKER_INTERNAL_URL": "https://configure-before-deploy.example"
       },

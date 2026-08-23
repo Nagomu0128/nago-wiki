@@ -13,6 +13,8 @@ export interface GoogleImportEnvironment {
   OAUTH_KV: KVNamespace;
   GOOGLE_CLIENT_ID: string;
   GOOGLE_CLIENT_SECRET: string;
+  GOOGLE_PICKER_API_KEY: string;
+  GOOGLE_CLOUD_PROJECT_NUMBER: string;
   TOKEN_ENCRYPTION_KEY: string;
 }
 
@@ -63,7 +65,7 @@ export async function fetchGoogleDocument(
   userId: string,
   documentId: string,
 ): Promise<unknown> {
-  const accessToken = await validAccessToken(environment, userId);
+  const accessToken = await getGoogleAccessToken(environment, userId);
   const url = new URL(
     `https://docs.googleapis.com/v1/documents/${encodeURIComponent(documentId)}`,
   );
@@ -81,7 +83,7 @@ export async function fetchGoogleDocument(
   return response.json();
 }
 
-async function validAccessToken(
+export async function getGoogleAccessToken(
   environment: GoogleImportEnvironment,
   userId: string,
 ): Promise<string> {

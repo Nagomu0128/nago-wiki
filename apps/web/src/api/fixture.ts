@@ -6,6 +6,7 @@ import type {
   CreatePageInput,
   ImportJob,
   ImportRequest,
+  GooglePickerConfiguration,
   MeResponse,
   MovePageInput,
   PageComment,
@@ -323,6 +324,17 @@ export class FixtureWikiApi implements WikiApi {
   ): Promise<{ authorizationUrl: string }> {
     await abortableDelay(signal);
     return { authorizationUrl: returnTo };
+  }
+
+  async getGoogleImportPickerConfiguration(
+    signal?: AbortSignal,
+  ): Promise<GooglePickerConfiguration> {
+    await abortableDelay(signal);
+    return {
+      accessToken: "fixture-access-token",
+      developerKey: "fixture-developer-key",
+      appId: "1234567890",
+    };
   }
 
   async getImport(id: string, signal?: AbortSignal) {

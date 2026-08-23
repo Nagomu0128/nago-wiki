@@ -173,6 +173,12 @@ export interface ApplyImportInput {
   acceptedTags: string[];
 }
 
+export interface GooglePickerConfiguration {
+  accessToken: string;
+  developerKey: string;
+  appId: string;
+}
+
 export type BotProvider = "discord" | "line";
 
 export interface AccountLinkCode {
@@ -200,6 +206,7 @@ export interface WikiApi {
   search(input: SearchRequest, signal?: AbortSignal): Promise<SearchResponse>;
   answer(query: string, knowledgeMode: "wiki_only" | "wiki_plus_general", signal?: AbortSignal): Promise<AnswerResponse>;
   getGoogleImportAuthorization(returnTo: string, signal?: AbortSignal): Promise<{ authorizationUrl: string }>;
+  getGoogleImportPickerConfiguration(signal?: AbortSignal): Promise<GooglePickerConfiguration>;
   createImport(input: ImportRequest, signal?: AbortSignal): Promise<ImportJob>;
   getImport(id: string, signal?: AbortSignal): Promise<ImportJob>;
   applyImport(id: string, input: ApplyImportInput, signal?: AbortSignal): Promise<PageResource>;

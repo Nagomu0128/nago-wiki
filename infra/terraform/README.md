@@ -25,7 +25,7 @@ managed certificate for `access_domain`; the Access application then protects
 that same hostname. The API token therefore also needs Workers Scripts write
 permission for the zone.
 
-Copy the resulting D1, KV, R2, Queue, AI Search, and AI Gateway identifiers into the `production` environment of `apps/worker/wrangler.jsonc`; the all-zero IDs are intentional non-deployable placeholders. Set `ACCESS_AUDIENCE`, `ACCESS_ISSUER`, `GOOGLE_CLIENT_ID`, `MCP_PUBLIC_ORIGIN`, `WORKER_INTERNAL_URL`, `WORKSPACE_ID`, and `ALLOW_DEVELOPMENT_IDENTITY=false` as non-secret production vars. Do not put secrets in Terraform state or committed Wrangler vars. Register only these values with `wrangler secret put --env production`:
+Copy the resulting D1, KV, R2, Queue, AI Search, and AI Gateway identifiers into the `production` environment of `apps/worker/wrangler.jsonc`; the all-zero IDs are intentional non-deployable placeholders. Set `ACCESS_AUDIENCE`, `ACCESS_ISSUER`, `GOOGLE_CLIENT_ID`, `GOOGLE_PICKER_API_KEY`, `GOOGLE_CLOUD_PROJECT_NUMBER`, `MCP_PUBLIC_ORIGIN`, `WORKER_INTERNAL_URL`, `WORKSPACE_ID`, and `ALLOW_DEVELOPMENT_IDENTITY=false` as non-secret production vars. Restrict the Picker browser API key to the Wiki hostname and Google Picker API. Do not put secrets in Terraform state or committed Wrangler vars. Register only these values with `wrangler secret put --env production`:
 
 ```text
 GOOGLE_CLIENT_SECRET

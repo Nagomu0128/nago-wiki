@@ -4,7 +4,10 @@ import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 
-import { exchangeGoogleAuthorizationCode } from "./google-client";
+import {
+  exchangeGoogleAuthorizationCode,
+  getGoogleAccessToken,
+} from "./google-client";
 import { GoogleTokenVault } from "./token-vault";
 import type { ImportWorkflowParams } from "./workflow";
 import { createRealtimeWikiCoreService } from "../core/realtime-mutations";
@@ -87,7 +90,7 @@ export function createImportRoutes(): Hono<ImportApi> {
     authorizationUrl.searchParams.set("response_type", "code");
     authorizationUrl.searchParams.set(
       "scope",
-      "openid email https://www.googleapis.com/auth/documents.readonly",
+      "openid email https://www.googleapis.com/auth/drive.file",
     );
     authorizationUrl.searchParams.set("access_type", "offline");
     authorizationUrl.searchParams.set("prompt", "consent select_account");
@@ -117,6 +120,19 @@ export function createImportRoutes(): Hono<ImportApi> {
     const redirect = new URL(pending.data.returnTo);
     redirect.searchParams.set("google", "connected");
     return context.redirect(redirect.toString(), 302);
+  });
+
+  routes.get("/imports/google/picker-config", async (context) => {
+    const identity = requireImportIdentity(context.get("identity"));
+    await requireEditor(context.env.DB, identity.id, identity.workspaceId);
+    const accessToken = await getGoogleAccessToken(context.env, identity.id);
+    context.header("cache-control", "no-store, max-age=0");
+    context.header("pragma", "no-cache");
+    return context.json({
+      accessToken,
+      developerKey: context.env.GOOGLE_PICKER_API_KEY,
+      appId: context.env.GOOGLE_CLOUD_PROJECT_NUMBER,
+    });
   });
 
   routes.post("/imports", zValidator("json", createImportSchema), async (context) => {

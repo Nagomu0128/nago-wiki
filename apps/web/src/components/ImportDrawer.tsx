@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useApiMutation, type ImportJob, type ImportRequest, type WikiApi } from "../api";
 import { diffLines } from "./diff";
 import { extractGoogleDocumentId } from "./google-document";
+import { pickGoogleDocument } from "./google-picker";
 
 export interface GoogleDocumentPicker {
   pick(): Promise<{ documentId: string; name: string } | null>;
@@ -26,6 +27,11 @@ export function ImportDrawer({ api, parentPageId, picker, onApplied }: ImportDra
 
   const connectGoogle = useApiMutation(async (_: null, signal) =>
     api.getGoogleImportAuthorization(window.location.href, signal));
+  const selectGoogleDocument = useApiMutation(async (_: null, signal) => {
+    if (picker !== undefined) return picker.pick();
+    const configuration = await api.getGoogleImportPickerConfiguration(signal);
+    return pickGoogleDocument(configuration);
+  });
   const createImport = useApiMutation(async (_: null, signal) => {
     const input: ImportRequest = {
       sourceType: "google_docs",
@@ -70,7 +76,7 @@ export function ImportDrawer({ api, parentPageId, picker, onApplied }: ImportDra
   }, [api, job]);
 
   const chooseGoogleDocument = async () => {
-    const selected = await picker?.pick();
+    const selected = await selectGoogleDocument.mutate(null);
     if (selected) {
       setSourceValue(selected.documentId);
       setSourceLabel(selected.name);
@@ -119,10 +125,19 @@ export function ImportDrawer({ api, parentPageId, picker, onApplied }: ImportDra
           {connectGoogle.status === "error" && (
             <div className="drawer-error" role="alert">{connectGoogle.error.message}</div>
           )}
-          {picker && (
-            <button onClick={() => { void chooseGoogleDocument().catch(() => undefined); }} type="button">
-              Google Pickerで文書を選択
-            </button>
+          <button
+            disabled={selectGoogleDocument.status === "loading"}
+            onClick={() => { void chooseGoogleDocument().catch(() => undefined); }}
+            type="button"
+          >
+            {selectGoogleDocument.status === "loading"
+              ? "Google Pickerを開いています…"
+              : "Google Pickerで文書を選択"}
+          </button>
+          {selectGoogleDocument.status === "error" && (
+            <div className="drawer-error" role="alert">
+              {selectGoogleDocument.error.message}
+            </div>
           )}
           <label>
             Google Docs URL または Document ID

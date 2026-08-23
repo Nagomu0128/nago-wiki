@@ -6,6 +6,7 @@ import type {
   CreatePageInput,
   ImportJob,
   ImportRequest,
+  GooglePickerConfiguration,
   MeResponse,
   MovePageInput,
   PageComment,
@@ -183,6 +184,12 @@ export class HttpWikiApi implements WikiApi {
       `/imports/google/authorize?${query.toString()}`,
       { signal: signal ?? null },
     );
+  }
+
+  getGoogleImportPickerConfiguration(signal?: AbortSignal) {
+    return this.request<GooglePickerConfiguration>("/imports/google/picker-config", {
+      signal: signal ?? null,
+    });
   }
 
   createImport(input: ImportRequest, signal?: AbortSignal) {
