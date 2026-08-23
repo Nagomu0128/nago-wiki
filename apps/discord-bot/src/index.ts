@@ -143,27 +143,27 @@ export async function runDiscordGateway(
   });
   healthServer.listen(configuration.port, "0.0.0.0");
 
-  manager.on(WebSocketShardEvents.Ready, ({ data, shardId }) => {
+  manager.on(WebSocketShardEvents.Ready, (data, shardId) => {
     ready = true;
     botUserId = data.user.id;
     console.info("Discord gateway connected", { botUserId, shardId });
   });
-  manager.on(WebSocketShardEvents.Resumed, ({ shardId }) => {
+  manager.on(WebSocketShardEvents.Resumed, (shardId) => {
     ready = true;
     console.info("Discord gateway session resumed", { shardId });
   });
-  manager.on(WebSocketShardEvents.Closed, ({ code, shardId }) => {
+  manager.on(WebSocketShardEvents.Closed, (code, shardId) => {
     ready = false;
     console.warn("Discord gateway disconnected", { code, shardId });
   });
-  manager.on(WebSocketShardEvents.Error, ({ error, shardId }) => {
+  manager.on(WebSocketShardEvents.Error, (error, shardId) => {
     ready = false;
     console.error("Discord gateway error", {
       shardId,
       error: error.message,
     });
   });
-  manager.on(WebSocketShardEvents.Dispatch, ({ data }) => {
+  manager.on(WebSocketShardEvents.Dispatch, (data) => {
     if (data.t !== GatewayDispatchEvents.MessageCreate || botUserId === null) return;
     const message: GatewayMessageCreateDispatchData = data.d;
     void handleMessage(rest, message, botUserId, configuration).catch(
