@@ -304,7 +304,7 @@ export class FixtureWikiApi implements WikiApi {
     const job: ImportJob = {
       id: crypto.randomUUID(),
       sourceType: input.sourceType,
-      sourceLabel: input.filename ?? input.sourceUrl ?? "Google Document: Product Notes",
+      sourceLabel: input.documentId || "Google Document: Product Notes",
       status: "preview_ready",
       previewMarkdown: "# Imported knowledge\n\n## 決定事項\n\nWikiへ移行する文章のプレビューです。\n\n- 見出し、箇条書き、表を保持\n- 変換不能要素は警告として残す",
       currentMarkdown: "# Imported knowledge\n\n以前のWiki本文です。",
@@ -315,6 +315,14 @@ export class FixtureWikiApi implements WikiApi {
     };
     this.imports.set(job.id, job);
     return clone(job);
+  }
+
+  async getGoogleImportAuthorization(
+    returnTo: string,
+    signal?: AbortSignal,
+  ): Promise<{ authorizationUrl: string }> {
+    await abortableDelay(signal);
+    return { authorizationUrl: returnTo };
   }
 
   async getImport(id: string, signal?: AbortSignal) {

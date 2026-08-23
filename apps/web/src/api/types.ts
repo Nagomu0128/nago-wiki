@@ -149,11 +149,8 @@ export type ImportSourceType = "google_docs" | "markdown" | "pdf" | "url" | "pas
 export type ImportStatus = "queued" | "running" | "preview_ready" | "applied" | "failed";
 
 export interface ImportRequest {
-  sourceType: ImportSourceType;
-  sourceUrl?: string;
-  documentId?: string;
-  filename?: string;
-  content?: string;
+  sourceType: "google_docs";
+  documentId: string;
 }
 
 export interface ImportJob {
@@ -161,7 +158,7 @@ export interface ImportJob {
   sourceType: ImportSourceType;
   sourceLabel: string;
   status: ImportStatus;
-  previewMarkdown?: string;
+  previewMarkdown?: string | null;
   currentMarkdown?: string;
   warnings: string[];
   suggestedTitle?: string;
@@ -202,6 +199,7 @@ export interface WikiApi {
   restoreVersion(pageId: string, versionId: string, baseRevision: number, signal?: AbortSignal): Promise<PageResource>;
   search(input: SearchRequest, signal?: AbortSignal): Promise<SearchResponse>;
   answer(query: string, knowledgeMode: "wiki_only" | "wiki_plus_general", signal?: AbortSignal): Promise<AnswerResponse>;
+  getGoogleImportAuthorization(returnTo: string, signal?: AbortSignal): Promise<{ authorizationUrl: string }>;
   createImport(input: ImportRequest, signal?: AbortSignal): Promise<ImportJob>;
   getImport(id: string, signal?: AbortSignal): Promise<ImportJob>;
   applyImport(id: string, input: ApplyImportInput, signal?: AbortSignal): Promise<PageResource>;

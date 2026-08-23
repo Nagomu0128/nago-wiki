@@ -8,6 +8,7 @@ import { exchangeGoogleAuthorizationCode } from "./google-client";
 import { GoogleTokenVault } from "./token-vault";
 import type { ImportWorkflowParams } from "./workflow";
 import { createRealtimeWikiCoreService } from "../core/realtime-mutations";
+import { TagsService } from "../core/tags-service";
 import type { McpRuntimeEnv } from "../mcp/types";
 
 interface ImportApi {
@@ -45,7 +46,6 @@ const googleStateSchema = z.object({
 });
 
 const createImportSchema = z.object({
-  workspaceId: z.string().min(1).max(128),
   source: z.object({
     type: z.literal("google_docs"),
     documentId: z.string().min(1).max(256),
@@ -56,6 +56,7 @@ const applyImportSchema = z.object({
   parentId: z.uuid().nullable().optional().default(null),
   title: z.string().trim().min(1).max(500).optional(),
   accessMode: z.enum(["workspace", "restricted"]).optional().default("workspace"),
+  acceptedTags: z.array(z.string().trim().min(1).max(100)).max(50).optional().default([]),
 });
 
 export function createImportRoutes(): Hono<ImportApi> {
@@ -86,7 +87,7 @@ export function createImportRoutes(): Hono<ImportApi> {
     authorizationUrl.searchParams.set("response_type", "code");
     authorizationUrl.searchParams.set(
       "scope",
-      "openid email https://www.googleapis.com/auth/drive.file",
+      "openid email https://www.googleapis.com/auth/documents.readonly",
     );
     authorizationUrl.searchParams.set("access_type", "offline");
     authorizationUrl.searchParams.set("prompt", "consent select_account");
@@ -130,9 +131,6 @@ export function createImportRoutes(): Hono<ImportApi> {
       throw new HTTPException(409, { message: "Connect Google before importing" });
     }
     const request = context.req.valid("json");
-    if (request.workspaceId !== identity.workspaceId) {
-      throw new HTTPException(403, { message: "Workspace access denied" });
-    }
     const importId = crypto.randomUUID();
     const now = new Date().toISOString();
     await context.env.DB.prepare(
@@ -143,7 +141,7 @@ export function createImportRoutes(): Hono<ImportApi> {
     )
       .bind(
         importId,
-        request.workspaceId,
+        identity.workspaceId,
         userId,
         JSON.stringify({ documentId: request.source.documentId }),
         now,
@@ -152,7 +150,7 @@ export function createImportRoutes(): Hono<ImportApi> {
 
     const parameters: ImportWorkflowParams = {
       importId,
-      workspaceId: request.workspaceId,
+      workspaceId: identity.workspaceId,
       requestedBy: userId,
       source: request.source,
     };
@@ -170,7 +168,16 @@ export function createImportRoutes(): Hono<ImportApi> {
         .run();
       throw error;
     }
-    return context.json({ id: importId, status: "queued" as const }, 202);
+    return context.json({
+      id: importId,
+      sourceType: "google_docs" as const,
+      sourceLabel: request.source.documentId,
+      status: "queued" as const,
+      warnings: [],
+      metadata: { documentId: request.source.documentId },
+      createdAt: now,
+      updatedAt: now,
+    }, 202);
   });
 
   routes.get("/imports/:id", async (context) => {
@@ -199,13 +206,25 @@ export function createImportRoutes(): Hono<ImportApi> {
     );
     const previewKey = typeof metadata.previewKey === "string" ? metadata.previewKey : null;
     const preview = previewKey === null ? null : await context.env.FILES.get(previewKey);
+    const report = value.report_r2_key === null
+      ? null
+      : await readImportReport(context.env.FILES, value.report_r2_key);
+    const title = typeof metadata.title === "string" ? metadata.title : undefined;
+    const documentId = typeof metadata.documentId === "string" ? metadata.documentId : "Google Document";
+    const errorMessage = typeof metadata.error === "string" ? metadata.error : undefined;
     return context.json({
       id: value.id,
       workspaceId: value.workspace_id,
       sourceType: value.source_type,
+      sourceLabel: title ?? documentId,
       status: value.status,
       metadata,
       previewMarkdown: preview === null ? null : await preview.text(),
+      warnings: report?.warnings ?? [],
+      ...(title === undefined ? {} : { suggestedTitle: title }),
+      ...(errorMessage === undefined
+        ? {}
+        : { error: { code: "IMPORT_FAILED", message: errorMessage } }),
       reportKey: value.report_r2_key,
       createdAt: value.created_at,
       updatedAt: value.updated_at,
@@ -237,12 +256,17 @@ export function createImportRoutes(): Hono<ImportApi> {
         parseJson(value.source_metadata_json),
       );
       if (value.status === "applied" && typeof metadata.pageId === "string") {
-        return context.json(
-          await createRealtimeWikiCoreService(context.env).getPage(
+        if (context.req.valid("json").acceptedTags.length > 0) {
+          await new TagsService(context.env.DB).replacePageTags(
             identity,
             metadata.pageId,
-          ),
-        );
+            context.req.valid("json").acceptedTags,
+          );
+        }
+        return context.json(await createRealtimeWikiCoreService(context.env).getPage(
+          identity,
+          metadata.pageId,
+        ));
       }
       if (value.status !== "preview_ready") {
         throw new HTTPException(409, { message: "Import preview is not ready" });
@@ -274,6 +298,13 @@ export function createImportRoutes(): Hono<ImportApi> {
         },
         `import:${importId}`,
       );
+      if (request.acceptedTags.length > 0) {
+        await new TagsService(context.env.DB).replacePageTags(
+          identity,
+          page.page.id,
+          request.acceptedTags,
+        );
+      }
       await context.env.DB.prepare(
         `UPDATE imports
             SET status = 'applied',
@@ -288,6 +319,22 @@ export function createImportRoutes(): Hono<ImportApi> {
   );
 
   return routes;
+}
+
+async function readImportReport(
+  files: R2Bucket,
+  key: string,
+): Promise<{ warnings: string[] } | null> {
+  const object = await files.get(key);
+  if (object === null || object.size > 1_048_576) return null;
+  try {
+    const parsed = z.object({
+      warnings: z.array(z.string().max(1_000)).max(100).default([]),
+    }).safeParse(await object.json());
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
 }
 
 async function requireEditor(

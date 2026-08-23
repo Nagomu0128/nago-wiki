@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import { useApiMutation, type ImportJob, type ImportRequest, type ImportSourceType, type WikiApi } from "../api";
+import { useApiMutation, type ImportJob, type ImportRequest, type WikiApi } from "../api";
 import { diffLines } from "./diff";
+import { extractGoogleDocumentId } from "./google-document";
 
 export interface GoogleDocumentPicker {
   pick(): Promise<{ documentId: string; name: string } | null>;
@@ -13,37 +14,37 @@ interface ImportDrawerProps {
   onApplied: (pageId: string) => void;
 }
 
-const sourceOptions: { value: ImportSourceType; label: string }[] = [
-  { value: "google_docs", label: "Google Docs" },
-  { value: "markdown", label: "Markdown" },
-  { value: "pdf", label: "PDF" },
-  { value: "url", label: "公開URL" },
-  { value: "paste", label: "貼り付け" },
-];
-
 export function ImportDrawer({ api, parentPageId, picker, onApplied }: ImportDrawerProps) {
-  const [sourceType, setSourceType] = useState<ImportSourceType>("google_docs");
   const [sourceValue, setSourceValue] = useState("");
   const [sourceLabel, setSourceLabel] = useState("");
   const [job, setJob] = useState<ImportJob | null>(null);
   const [title, setTitle] = useState("");
   const [acceptedTags, setAcceptedTags] = useState<string[]>([]);
-  const [sourceError, setSourceError] = useState<Error | null>(null);
   const [pollError, setPollError] = useState<Error | null>(null);
+  const googleConnected = typeof window !== "undefined" &&
+    new URLSearchParams(window.location.search).get("google") === "connected";
+
+  const connectGoogle = useApiMutation(async (_: null, signal) =>
+    api.getGoogleImportAuthorization(window.location.href, signal));
   const createImport = useApiMutation(async (_: null, signal) => {
-    const input: ImportRequest = sourceType === "google_docs"
-      ? { sourceType, documentId: sourceValue }
-      : sourceType === "url"
-        ? { sourceType, sourceUrl: sourceValue }
-        : { sourceType, ...(sourceLabel ? { filename: sourceLabel } : {}), ...(sourceValue ? { content: sourceValue } : {}) };
+    const input: ImportRequest = {
+      sourceType: "google_docs",
+      documentId: extractGoogleDocumentId(sourceValue),
+    };
     return api.createImport(input, signal);
   });
-  const applyImport = useApiMutation((input: { jobId: string; title: string; tags: string[] }, signal) => api.applyImport(input.jobId, {
-    parentId: parentPageId,
-    title: input.title,
-    acceptedTags: input.tags,
-  }, signal));
-  const diff = useMemo(() => job ? diffLines(job.currentMarkdown ?? "", job.previewMarkdown ?? "") : [], [job]);
+  const applyImport = useApiMutation(
+    (input: { jobId: string; title: string; tags: string[] }, signal) =>
+      api.applyImport(input.jobId, {
+        parentId: parentPageId,
+        title: input.title,
+        acceptedTags: input.tags,
+      }, signal),
+  );
+  const diff = useMemo(
+    () => job ? diffLines(job.currentMarkdown ?? "", job.previewMarkdown ?? "") : [],
+    [job],
+  );
 
   useEffect(() => {
     if (!job || (job.status !== "queued" && job.status !== "running")) return;
@@ -57,7 +58,9 @@ export function ImportDrawer({ api, parentPageId, picker, onApplied }: ImportDra
           setAcceptedTags(updated.suggestedTags ?? []);
         }
       }, (error: unknown) => {
-        if (!controller.signal.aborted) setPollError(error instanceof Error ? error : new Error(String(error)));
+        if (!controller.signal.aborted) {
+          setPollError(error instanceof Error ? error : new Error(String(error)));
+        }
       });
     }, 1_200);
     return () => {
@@ -72,6 +75,11 @@ export function ImportDrawer({ api, parentPageId, picker, onApplied }: ImportDra
       setSourceValue(selected.documentId);
       setSourceLabel(selected.name);
     }
+  };
+
+  const authorizeGoogle = async () => {
+    const result = await connectGoogle.mutate(null);
+    window.location.assign(result.authorizationUrl);
   };
 
   const startImport = async () => {
@@ -91,64 +99,122 @@ export function ImportDrawer({ api, parentPageId, picker, onApplied }: ImportDra
 
   return (
     <div className="import-panel">
-      <div className="drawer-section-title"><span>Knowledge intake</span><h2>知識を取り込む</h2><p>変換結果と差分を確認してからWikiへ反映します。</p></div>
+      <div className="drawer-section-title">
+        <span>Knowledge intake</span>
+        <h2>Google Docsを取り込む</h2>
+        <p>変換結果と警告を確認してからWikiへ反映します。</p>
+      </div>
       {!job ? (
-        <>
-          <div className="source-options" role="tablist" aria-label="取り込み元">
-            {sourceOptions.map((option) => <button aria-selected={sourceType === option.value} key={option.value} onClick={() => { setSourceType(option.value); setSourceValue(""); setSourceLabel(""); }} role="tab" type="button">{option.label}</button>)}
-          </div>
-          <div className="source-form">
-            {sourceType === "google_docs" && (
-              <>
-                <button className="google-picker-button" disabled={!picker} onClick={() => { void chooseGoogleDocument().catch(() => undefined); }} type="button"><span>G</span>{sourceLabel || "Google Pickerで文書を選択"}</button>
-                {!picker && <small>Google Picker adapter接続後に利用できます。開発時はDocument IDを入力できます。</small>}
-                <label>Document ID<input onChange={(event) => { setSourceValue(event.target.value); }} placeholder="1AbC…" value={sourceValue} /></label>
-              </>
-            )}
-            {sourceType === "url" && <label>公開URL<input onChange={(event) => { setSourceValue(event.target.value); }} placeholder="https://example.com/article" type="url" value={sourceValue} /></label>}
-            {(sourceType === "markdown" || sourceType === "pdf") && (
-              <label className="file-drop">ファイルを選択<input accept={sourceType === "pdf" ? ".pdf,application/pdf" : ".md,.markdown,text/markdown"} onChange={(event) => {
-                const file = event.target.files?.[0];
-                if (!file) return;
-                setSourceLabel(file.name);
-                setSourceError(null);
-                const read = sourceType === "markdown" ? file.text() : readFileAsDataUrl(file);
-                void read.then(setSourceValue, (error: unknown) => {
-                  setSourceError(error instanceof Error ? error : new Error(String(error)));
-                });
-              }} type="file" /><span>{sourceLabel || `${sourceType === "pdf" ? "PDF" : "Markdown"}をここへ選択`}</span></label>
-            )}
-            {sourceType === "paste" && <label>本文<textarea onChange={(event) => { setSourceValue(event.target.value); }} placeholder="HTMLまたはテキストを貼り付け…" rows={9} value={sourceValue} /></label>}
-            {sourceError && <div className="drawer-error" role="alert">{sourceError.message}</div>}
-            {createImport.status === "error" && <div className="drawer-error" role="alert">{createImport.error.message}</div>}
-            <button className="import-start" disabled={!sourceValue && !sourceLabel || createImport.status === "loading"} onClick={() => { void startImport().catch(() => undefined); }} type="button">{createImport.status === "loading" ? "変換を開始中…" : "プレビューを作成"}</button>
-          </div>
-        </>
+        <div className="source-form">
+          <button
+            className="google-picker-button"
+            disabled={connectGoogle.status === "loading"}
+            onClick={() => { void authorizeGoogle().catch(() => undefined); }}
+            type="button"
+          >
+            <span>G</span>
+            {connectGoogle.status === "loading" ? "Googleへ接続中…" : "Googleアカウントを接続"}
+          </button>
+          {googleConnected && <small role="status">Googleアカウントを接続しました。</small>}
+          {connectGoogle.status === "error" && (
+            <div className="drawer-error" role="alert">{connectGoogle.error.message}</div>
+          )}
+          {picker && (
+            <button onClick={() => { void chooseGoogleDocument().catch(() => undefined); }} type="button">
+              Google Pickerで文書を選択
+            </button>
+          )}
+          <label>
+            Google Docs URL または Document ID
+            <input
+              onChange={(event) => {
+                setSourceValue(event.target.value);
+                setSourceLabel("");
+              }}
+              placeholder="https://docs.google.com/document/d/…/edit"
+              value={sourceValue}
+            />
+          </label>
+          {sourceLabel && <small>選択中: {sourceLabel}</small>}
+          {createImport.status === "error" && (
+            <div className="drawer-error" role="alert">{createImport.error.message}</div>
+          )}
+          <button
+            className="import-start"
+            disabled={!sourceValue.trim() || createImport.status === "loading"}
+            onClick={() => { void startImport().catch(() => undefined); }}
+            type="button"
+          >
+            {createImport.status === "loading" ? "変換を開始中…" : "プレビューを作成"}
+          </button>
+        </div>
       ) : (
         <div className="import-preview">
-          <div className="import-job-state"><span className={`is-${job.status}`}>{job.status === "preview_ready" ? "プレビュー準備完了" : job.status}</span><small>{job.sourceLabel}</small></div>
+          <div className="import-job-state">
+            <span className={`is-${job.status}`}>
+              {job.status === "preview_ready" ? "プレビュー準備完了" : job.status}
+            </span>
+            <small>{job.sourceLabel}</small>
+          </div>
           {pollError && <div className="drawer-error" role="alert">{pollError.message}</div>}
-          {job.warnings.map((warning) => <div className="inline-warning" key={warning}>{warning}</div>)}
-          <label>ページタイトル<input onChange={(event) => { setTitle(event.target.value); }} value={title} /></label>
-          {job.suggestedTags && <div className="suggested-tags"><span>AIによるタグ候補</span>{job.suggestedTags.map((tag) => <button aria-pressed={acceptedTags.includes(tag)} key={tag} onClick={() => { setAcceptedTags((current) => current.includes(tag) ? current.filter((value) => value !== tag) : [...current, tag]); }} type="button">#{tag}</button>)}</div>}
-          <div className="diff-header"><strong>現在の本文との差分</strong><span><i className="added" />追加 <i className="removed" />削除</span></div>
-          <pre className="diff-view" aria-label="取り込み差分">{diff.map((line, index) => <span className={`is-${line.kind}`} key={`${String(index)}-${line.kind}`}><b>{line.kind === "added" ? "+" : line.kind === "removed" ? "−" : " "}</b>{line.value || " "}</span>)}</pre>
-          {applyImport.status === "error" && <div className="drawer-error" role="alert">{applyImport.error.message}</div>}
-          <div className="import-actions"><button onClick={() => { setJob(null); }} type="button">戻る</button><button disabled={!title.trim() || applyImport.status === "loading"} onClick={() => { void apply().catch(() => undefined); }} type="button">Wikiへ反映</button></div>
+          {job.error && <div className="drawer-error" role="alert">{job.error.message}</div>}
+          {job.warnings.map((warning) => (
+            <div className="inline-warning" key={warning}>{warning}</div>
+          ))}
+          <label>
+            ページタイトル
+            <input onChange={(event) => { setTitle(event.target.value); }} value={title} />
+          </label>
+          {job.suggestedTags && (
+            <div className="suggested-tags">
+              <span>提案タグ</span>
+              {job.suggestedTags.map((tag) => (
+                <button
+                  aria-pressed={acceptedTags.includes(tag)}
+                  key={tag}
+                  onClick={() => {
+                    setAcceptedTags((current) => current.includes(tag)
+                      ? current.filter((value) => value !== tag)
+                      : [...current, tag]);
+                  }}
+                  type="button"
+                >
+                  #{tag}
+                </button>
+              ))}
+            </div>
+          )}
+          <div className="diff-header">
+            <strong>取り込みプレビュー</strong>
+            <span><i className="added" />追加 <i className="removed" />削除</span>
+          </div>
+          <pre className="diff-view" aria-label="取り込み差分">
+            {diff.map((line, index) => (
+              <span className={`is-${line.kind}`} key={`${String(index)}-${line.kind}`}>
+                <b>{line.kind === "added" ? "+" : line.kind === "removed" ? "−" : " "}</b>
+                {line.value || " "}
+              </span>
+            ))}
+          </pre>
+          {applyImport.status === "error" && (
+            <div className="drawer-error" role="alert">{applyImport.error.message}</div>
+          )}
+          <div className="import-actions">
+            <button onClick={() => { setJob(null); }} type="button">戻る</button>
+            <button
+              disabled={
+                job.status !== "preview_ready" ||
+                !title.trim() ||
+                applyImport.status === "loading"
+              }
+              onClick={() => { void apply().catch(() => undefined); }}
+              type="button"
+            >
+              Wikiへ反映
+            </button>
+          </div>
         </div>
       )}
     </div>
   );
-}
-
-function readFileAsDataUrl(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.addEventListener("load", () => {
-      if (typeof reader.result === "string") resolve(reader.result);
-      else reject(new Error("PDFを読み込めませんでした。"));
-    });
-    reader.addEventListener("error", () => { reject(reader.error ?? new Error("PDFを読み込めませんでした。")); });
-    reader.readAsDataURL(file);
-  });
 }

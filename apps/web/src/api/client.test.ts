@@ -22,4 +22,25 @@ describe("HttpWikiApi", () => {
 
     await expect(api.getTree()).rejects.toMatchObject({ code: "NETWORK_ERROR", status: 0 });
   });
+
+  it("maps the Google import request to the Worker contract", async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(Response.json({
+      id: "import-1",
+      sourceType: "google_docs",
+      sourceLabel: "document-1",
+      status: "queued",
+      warnings: [],
+      createdAt: "2026-08-23T00:00:00.000Z",
+    }, { status: 202 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = new HttpWikiApi("https://wiki.example/api/v1");
+
+    await api.createImport({ sourceType: "google_docs", documentId: "document-1" });
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("https://wiki.example/api/v1/imports");
+    expect(fetchMock.mock.calls[0]?.[1]?.body).toBe(JSON.stringify({
+      source: { type: "google_docs", documentId: "document-1" },
+    }));
+  });
 });

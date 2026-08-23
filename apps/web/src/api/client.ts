@@ -177,10 +177,20 @@ export class HttpWikiApi implements WikiApi {
     });
   }
 
+  getGoogleImportAuthorization(returnTo: string, signal?: AbortSignal) {
+    const query = new URLSearchParams({ returnTo });
+    return this.request<{ authorizationUrl: string }>(
+      `/imports/google/authorize?${query.toString()}`,
+      { signal: signal ?? null },
+    );
+  }
+
   createImport(input: ImportRequest, signal?: AbortSignal) {
     return this.request<ImportJob>("/imports", {
       method: "POST",
-      body: JSON.stringify(input),
+      body: JSON.stringify({
+        source: { type: input.sourceType, documentId: input.documentId },
+      }),
       headers: { "Idempotency-Key": crypto.randomUUID() },
       signal: signal ?? null,
     });
