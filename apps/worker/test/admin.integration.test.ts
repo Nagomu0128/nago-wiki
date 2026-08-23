@@ -5,12 +5,14 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import { createAdminRoutes } from "../src/admin/routes";
 import { AdminService } from "../src/admin/service";
+import { answerBotQuery } from "../src/bots/service";
 import {
   coreErrorHandler,
   coreRequestContext,
   type CoreHonoEnv,
 } from "../src/core/context";
 import { DEFAULT_WORKSPACE_ID } from "../src/core/repository";
+import type { McpRuntimeEnv } from "../src/mcp/types";
 
 const ownerId = "00000000-0000-7000-8000-000000000010";
 const editorId = "00000000-0000-7000-8000-000000000011";
@@ -149,6 +151,28 @@ describe("owner administration", () => {
       enabled: false,
       channels: [{ externalChannelId: "channel-123" }],
     });
+    const now = new Date().toISOString();
+    await env.DB.prepare(
+      `INSERT INTO bot_events
+         (provider, event_id, user_id, status, response_hash, response_text,
+          created_at, updated_at)
+       VALUES ('discord', 'disabled-event', NULL, 'received', NULL, NULL, ?1, ?1)`,
+    )
+      .bind(now)
+      .run();
+    await expect(
+      answerBotQuery(env as McpRuntimeEnv, {
+        provider: "discord",
+        eventId: "disabled-event",
+        externalUserId: "external-user",
+        externalChannelId: null,
+        query: "should not run",
+      }),
+    ).resolves.toBeNull();
+    const ignored = await env.DB.prepare(
+      `SELECT status FROM bot_events WHERE provider = 'discord' AND event_id = 'disabled-event'`,
+    ).first<{ status: string }>();
+    expect(ignored?.status).toBe("ignored");
 
     const forbidden = await testApp(editor).request(
       "https://wiki.example/api/v1/admin/bots",
@@ -184,6 +208,9 @@ async function resetDatabase(): Promise<void> {
     DELETE FROM audit_events;
     DELETE FROM workspace_bot_settings;
     DELETE FROM bot_channel_allowlist;
+    DELETE FROM bot_events;
+    DELETE FROM bot_rate_limits;
+    DELETE FROM account_link_codes;
     DELETE FROM external_identities;
     UPDATE pages SET parent_id = NULL;
     DELETE FROM pages;
