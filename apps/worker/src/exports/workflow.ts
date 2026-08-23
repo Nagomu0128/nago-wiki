@@ -1,5 +1,6 @@
 import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
+import { sha256 } from "@noble/hashes/sha2.js";
 import { z } from "zod";
 
 import {
@@ -23,6 +24,7 @@ import {
   portableExportPageSchema,
   portableExportPageTagSchema,
   portableExportTagSchema,
+  portableExportVersionSchema,
   type PortableExportAcl,
   type PortableExportAlias,
   type PortableExportAsset,
@@ -32,12 +34,18 @@ import {
   type PortableExportPage,
   type PortableExportPageTag,
   type PortableExportTag,
+  type PortableExportVersion,
   type PortableManifestInput,
 } from "./manifest";
 import type { McpRuntimeEnv } from "../mcp/types";
 
 const encoder = new TextEncoder();
 const TARGET_PART_BYTES = 5 * 1024 * 1024;
+const MAX_ENTRIES_PER_STAGE = 400;
+const MAX_EXPORT_MULTIPART_PARTS = 8_000;
+const MAX_EXPORT_OBJECT_BYTES = 256 * 1024 * 1024;
+const MAX_EXPORT_ARCHIVE_BYTES = 32 * 1024 * 1024 * 1024;
+const MAX_EXPORT_PLAN_BYTES = 8 * 1024 * 1024;
 const MAX_EXPORT_WORKFLOW_STEPS = 25_000;
 
 export const exportWorkflowParamsSchema = z
@@ -80,6 +88,7 @@ const storedPlanSchema = z.object({
   exportedAt: z.string(),
   members: z.array(portableExportMemberSchema),
   pages: z.array(portableExportPageSchema),
+  versions: z.array(portableExportVersionSchema),
   assets: z.array(portableExportAssetSchema),
   acl: z.array(portableExportAclSchema),
   tags: z.array(portableExportTagSchema),
@@ -126,6 +135,18 @@ interface PageBodyRow {
   body_md: string;
 }
 
+interface VersionRow {
+  id: string;
+  page_id: string;
+  revision: number;
+  r2_key: string;
+  content_hash: string;
+  author_id: string;
+  reason: "create" | "edit" | "move" | "restore" | "import" | "manual";
+  storage_status: "pending" | "ready" | "failed";
+  created_at: string;
+}
+
 interface ExportDbRow {
   r2_key: string | null;
   multipart_upload_id: string | null;
@@ -142,7 +163,7 @@ export interface PlanStepResult {
 }
 
 interface UploadStepResult {
-  uploadId: string;
+  uploadId: string | null;
 }
 
 export interface StagedArchivePart {
@@ -265,39 +286,48 @@ export class ExportWorkflow extends WorkflowEntrypoint<
         stagedParts.push(part);
       }
 
+      await step.do("verify export snapshot is unchanged", async () => {
+        await assertExportSnapshotUnchanged(this.env, plan.planKey);
+        return { verified: true as const };
+      });
+      const expectedArchiveHash = await step.do(
+        "hash staged portable export",
+        async () =>
+          hashStagedArchive(this.env.FILES, stagedParts, plan.archiveSize),
+      );
+
       upload = await step.do("create archive multipart upload", async () =>
-        createOrResumeUpload(this.env, parameters, plan),
+        createOrResumeUpload(this.env, parameters, plan, expectedArchiveHash),
       );
       const uploadId = upload.uploadId;
 
       const completedParts: UploadedArchivePart[] = [];
-      for (let index = 0; index < plan.partCount; index += 1) {
-        const part = await step.do(
-          `upload archive part ${String(index + 1).padStart(5, "0")}`,
-          async () =>
-            uploadArchivePart(
-              this.env.FILES,
-              plan,
-              stagedParts,
-              uploadId,
-              index,
-            ),
-        );
-        completedParts.push(part);
+      if (uploadId !== null) {
+        for (let index = 0; index < plan.partCount; index += 1) {
+          const part = await step.do(
+            `upload archive part ${String(index + 1).padStart(5, "0")}`,
+            async () =>
+              uploadArchivePart(
+                this.env.FILES,
+                plan,
+                stagedParts,
+                uploadId,
+                index,
+              ),
+          );
+          completedParts.push(part);
+        }
       }
 
       const completed = await step.do("complete portable export", async () => {
         const existing = await this.env.FILES.head(plan.archiveKey);
         const object =
           existing ??
-          (await this.env.FILES.resumeMultipartUpload(
+          (await completeRequiredUpload(
+            this.env.FILES,
             plan.archiveKey,
             uploadId,
-          ).complete(
-            completedParts.map(({ partNumber, etag }) => ({
-              partNumber,
-              etag,
-            })),
+            completedParts,
           ));
         if (object.size !== plan.archiveSize) {
           throw new Error(
@@ -309,6 +339,9 @@ export class ExportWorkflow extends WorkflowEntrypoint<
       const archiveHash = await step.do("verify portable export", async () =>
         hashR2Object(this.env.FILES, plan.archiveKey, plan.archiveSize),
       );
+      if (archiveHash !== expectedArchiveHash) {
+        throw new Error("Completed export archive hash does not match staging");
+      }
       await step.do("remove staged archive segments", async () => {
         await deleteR2Keys(
           this.env.FILES,
@@ -381,39 +414,50 @@ export class ExportWorkflow extends WorkflowEntrypoint<
           .run();
         return { status: "failed" as const };
       });
-      if (upload !== undefined) {
-        await step.do("abort failed archive upload", async () => {
+      await step
+        .do("abort failed archive upload", async () => {
           const row = await this.env.DB.prepare(
             `SELECT r2_key, multipart_upload_id FROM exports WHERE id = ?1`,
           )
             .bind(parameters.exportId)
             .first<ExportDbRow>();
-          if (row?.multipart_upload_id && row.r2_key) {
-            const completed = await this.env.FILES.head(row.r2_key);
-            if (completed === null) {
-              await this.env.FILES.resumeMultipartUpload(
-                row.r2_key,
-                row.multipart_upload_id,
-              ).abort();
+          try {
+            if (row?.multipart_upload_id && row.r2_key) {
+              const completed = await this.env.FILES.head(row.r2_key);
+              if (completed === null) {
+                await this.env.FILES.resumeMultipartUpload(
+                  row.r2_key,
+                  row.multipart_upload_id,
+                )
+                  .abort()
+                  .catch(() => undefined);
+              }
             }
+          } finally {
+            await this.env.DB.prepare(
+              "UPDATE exports SET multipart_upload_id = NULL WHERE id = ?1",
+            )
+              .bind(parameters.exportId)
+              .run();
           }
-          await this.env.DB.prepare(
-            "UPDATE exports SET multipart_upload_id = NULL WHERE id = ?1",
-          )
-            .bind(parameters.exportId)
-            .run();
-          return { aborted: true as const };
+          return { aborted: row?.multipart_upload_id !== null };
+        })
+        .catch((cleanupError: unknown) => {
+          console.error("Failed to clear export multipart upload", {
+            exportId: parameters.exportId,
+            error:
+              cleanupError instanceof Error
+                ? cleanupError.message
+                : "Unknown error",
+          });
         });
-      }
-      if (stagedParts.length > 0) {
-        await step.do("remove failed archive segments", async () => {
-          await deleteR2Keys(
-            this.env.FILES,
-            stagedParts.map((part) => part.key),
-          );
-          return { removed: stagedParts.length };
-        });
-      }
+      await step.do("remove failed export artifacts", async () => {
+        const removed = await deleteR2Prefix(
+          this.env.FILES,
+          exportArtifactPrefix(parameters),
+        );
+        return { removed };
+      });
       throw error;
     }
   }
@@ -423,10 +467,15 @@ async function createAndStorePlan(
   environment: McpRuntimeEnv,
   parameters: ExportWorkflowParams,
 ): Promise<PlanStepResult> {
-  const [
+  const metadata = await collectExportMetadata(
+    environment,
+    parameters.workspaceId,
+  );
+  const {
     workspaceName,
     members,
     pages,
+    versions,
     assets,
     acl,
     tags,
@@ -434,18 +483,7 @@ async function createAndStorePlan(
     links,
     aliases,
     comments,
-  ] = await Promise.all([
-    getExportWorkspaceName(environment.DB, parameters.workspaceId),
-    listExportMembers(environment.DB, parameters.workspaceId),
-    listExportPages(environment.DB, parameters.workspaceId),
-    listExportAssets(environment.FILES, parameters.workspaceId),
-    listExportAcl(environment.DB, parameters.workspaceId),
-    listExportTags(environment.DB, parameters.workspaceId),
-    listExportPageTags(environment.DB, parameters.workspaceId),
-    listExportLinks(environment.DB, parameters.workspaceId),
-    listExportAliases(environment.DB, parameters.workspaceId),
-    listExportComments(environment.DB, parameters.workspaceId),
-  ]);
+  } = metadata;
   const exportedAt = new Date().toISOString();
   const manifestInput: PortableManifestInput = {
     exportId: parameters.exportId,
@@ -454,6 +492,7 @@ async function createAndStorePlan(
     exportedAt,
     members,
     pages,
+    versions,
     assets,
     acl,
     tags,
@@ -465,11 +504,23 @@ async function createAndStorePlan(
   const manifest = buildPortableManifest(manifestInput, new Map(), true);
   const zip = planStoredZip([
     ...pages.map((page) => ({ name: page.file, size: page.bodyBytes })),
+    ...versions.map((version) => ({
+      name: version.file,
+      size: version.bodyBytes,
+    })),
     ...assets.map((asset) => ({ name: asset.file, size: asset.size })),
     { name: "manifest.json", size: encoder.encode(manifest).byteLength },
   ]);
+  if (zip.archiveSize > MAX_EXPORT_ARCHIVE_BYTES) {
+    throw new Error("Export archive exceeds the 32 GiB portable export limit");
+  }
   const groups = groupEntries(zip);
   const multipart = planR2MultipartUpload(zip.archiveSize);
+  if (multipart.parts.length > MAX_EXPORT_MULTIPART_PARTS) {
+    throw new Error(
+      "Export archive exceeds the supported Workflow multipart capacity",
+    );
+  }
   if (groups.length + multipart.parts.length + 12 > MAX_EXPORT_WORKFLOW_STEPS) {
     throw new Error("Export archive requires too many workflow steps");
   }
@@ -481,6 +532,7 @@ async function createAndStorePlan(
     exportedAt,
     members,
     pages,
+    versions,
     assets,
     acl,
     tags,
@@ -494,7 +546,11 @@ async function createAndStorePlan(
   const prefix = exportArtifactPrefix(parameters);
   const planKey = `${prefix}plan.json`;
   const archiveKey = `${prefix}wiki-export.zip`;
-  await environment.FILES.put(planKey, JSON.stringify(storedPlan), {
+  const storedPlanJson = JSON.stringify(storedPlan);
+  if (encoder.encode(storedPlanJson).byteLength > MAX_EXPORT_PLAN_BYTES) {
+    throw new Error("Export metadata exceeds the portable plan limit");
+  }
+  await environment.FILES.put(planKey, storedPlanJson, {
     httpMetadata: { contentType: "application/json; charset=utf-8" },
     customMetadata: { export_id: parameters.exportId, kind: "plan" },
   });
@@ -524,16 +580,140 @@ async function createAndStorePlan(
   };
 }
 
+async function collectExportMetadata(
+  environment: Pick<McpRuntimeEnv, "DB" | "FILES">,
+  workspaceId: string,
+) {
+  const [
+    workspaceName,
+    members,
+    pages,
+    versions,
+    assets,
+    acl,
+    tags,
+    pageTags,
+    links,
+    aliases,
+    comments,
+  ] = await Promise.all([
+    getExportWorkspaceName(environment.DB, workspaceId),
+    listExportMembers(environment.DB, workspaceId),
+    listExportPages(environment.DB, workspaceId),
+    listExportVersions(environment.DB, environment.FILES, workspaceId),
+    listExportAssets(environment.FILES, workspaceId),
+    listExportAcl(environment.DB, workspaceId),
+    listExportTags(environment.DB, workspaceId),
+    listExportPageTags(environment.DB, workspaceId),
+    listExportLinks(environment.DB, workspaceId),
+    listExportAliases(environment.DB, workspaceId),
+    listExportComments(environment.DB, workspaceId),
+  ]);
+  return {
+    workspaceName,
+    members,
+    pages,
+    versions,
+    assets,
+    acl,
+    tags,
+    pageTags,
+    links,
+    aliases,
+    comments,
+  };
+}
+
+async function assertExportSnapshotUnchanged(
+  environment: Pick<McpRuntimeEnv, "DB" | "FILES">,
+  planKey: string,
+): Promise<void> {
+  const plan = await loadPlan(environment.FILES, planKey);
+  const current = await collectExportMetadata(environment, plan.workspaceId);
+  const planned = {
+    workspaceName: plan.workspaceName,
+    members: plan.members,
+    pages: plan.pages,
+    versions: plan.versions,
+    assets: plan.assets,
+    acl: plan.acl,
+    tags: plan.tags,
+    pageTags: plan.pageTags,
+    links: plan.links,
+    aliases: plan.aliases,
+    comments: plan.comments,
+  };
+  const plannedHash = await sha256Bytes(
+    encoder.encode(JSON.stringify(planned)),
+  );
+  const currentHash = await sha256Bytes(
+    encoder.encode(JSON.stringify(current)),
+  );
+  if (plannedHash !== currentHash) {
+    throw new Error(
+      "Wiki metadata changed while the export was being created; start a new export",
+    );
+  }
+}
+
 async function createOrResumeUpload(
   environment: McpRuntimeEnv,
   parameters: ExportWorkflowParams,
   plan: PlanStepResult,
+  expectedArchiveHash: string,
 ): Promise<UploadStepResult> {
   const row = await environment.DB.prepare(
     `SELECT r2_key, multipart_upload_id FROM exports WHERE id = ?1`,
   )
     .bind(parameters.exportId)
     .first<ExportDbRow>();
+  const completed = await environment.FILES.head(plan.archiveKey);
+  if (completed !== null) {
+    const matches =
+      completed.size === plan.archiveSize &&
+      (await hashR2Object(
+        environment.FILES,
+        plan.archiveKey,
+        plan.archiveSize,
+      )) === expectedArchiveHash;
+    if (matches) {
+      if (
+        row?.multipart_upload_id !== null &&
+        row?.multipart_upload_id !== undefined
+      ) {
+        await environment.FILES.resumeMultipartUpload(
+          plan.archiveKey,
+          row.multipart_upload_id,
+        )
+          .abort()
+          .catch(() => undefined);
+        await environment.DB.prepare(
+          "UPDATE exports SET multipart_upload_id = NULL WHERE id = ?1",
+        )
+          .bind(parameters.exportId)
+          .run();
+      }
+      return { uploadId: null };
+    }
+    await environment.FILES.delete(plan.archiveKey);
+    if (
+      row?.multipart_upload_id !== null &&
+      row?.multipart_upload_id !== undefined
+    ) {
+      await environment.FILES.resumeMultipartUpload(
+        plan.archiveKey,
+        row.multipart_upload_id,
+      )
+        .abort()
+        .catch(() => undefined);
+      await environment.DB.prepare(
+        "UPDATE exports SET multipart_upload_id = NULL WHERE id = ?1",
+      )
+        .bind(parameters.exportId)
+        .run();
+      row.multipart_upload_id = null;
+    }
+  }
   if (row?.r2_key === plan.archiveKey && row.multipart_upload_id !== null) {
     return { uploadId: row.multipart_upload_id };
   }
@@ -547,15 +727,50 @@ async function createOrResumeUpload(
       customMetadata: {
         export_id: parameters.exportId,
         workspace_id: parameters.workspaceId,
+        archive_hash: expectedArchiveHash,
       },
     },
   );
-  await environment.DB.prepare(
-    `UPDATE exports SET multipart_upload_id = ?2, updated_at = ?3 WHERE id = ?1`,
-  )
-    .bind(parameters.exportId, upload.uploadId, new Date().toISOString())
-    .run();
+  try {
+    await environment.DB.prepare(
+      `UPDATE exports SET multipart_upload_id = ?2, updated_at = ?3 WHERE id = ?1`,
+    )
+      .bind(parameters.exportId, upload.uploadId, new Date().toISOString())
+      .run();
+  } catch (error) {
+    await upload.abort().catch(() => undefined);
+    throw error;
+  }
   return { uploadId: upload.uploadId };
+}
+
+async function hashStagedArchive(
+  bucket: R2Bucket,
+  stages: readonly StagedArchivePart[],
+  archiveSize: number,
+): Promise<string> {
+  const digest = createStreamingSha256();
+  for await (const chunk of streamStagedRange(bucket, stages, 0, archiveSize)) {
+    await digest.update(chunk);
+  }
+  return digest.hex();
+}
+
+async function completeRequiredUpload(
+  bucket: R2Bucket,
+  archiveKey: string,
+  uploadId: string | null,
+  completedParts: readonly UploadedArchivePart[],
+): Promise<R2Object> {
+  if (uploadId === null) {
+    throw new Error("Completed export archive is unavailable");
+  }
+  return bucket.resumeMultipartUpload(archiveKey, uploadId).complete(
+    completedParts.map(({ partNumber, etag }) => ({
+      partNumber,
+      etag,
+    })),
+  );
 }
 
 export async function stageArchiveSegment(
@@ -706,7 +921,8 @@ async function* streamArchivePart(
   assetHashes: Map<string, string>,
   includeCentralDirectory: boolean,
 ): AsyncGenerator<Uint8Array> {
-  const manifestIndex = plan.pages.length + plan.assets.length;
+  const versionEnd = plan.pages.length + plan.versions.length;
+  const manifestIndex = versionEnd + plan.assets.length;
   for (let index = group.start; index < group.end; index += 1) {
     const entry = requiredAt(plan.zip.entries, index, "ZIP entry");
     yield buildStoredLocalHeader(entry);
@@ -721,40 +937,65 @@ async function* streamArchivePart(
       checksum.update(data);
       written = data.byteLength;
       yield data;
-    } else if (index < manifestIndex) {
-      const asset = requiredAt(
-        plan.assets,
+    } else if (index < versionEnd) {
+      const version = requiredAt(
+        plan.versions,
         index - plan.pages.length,
-        "export asset",
+        "export version",
       );
-      const object = await bucket.get(asset.sourceKey);
-      if (object?.size !== asset.size || object.etag !== asset.etag) {
+      const object = await bucket.get(version.sourceKey);
+      if (
+        object?.size !== version.bodyBytes ||
+        object.etag !== version.sourceEtag
+      ) {
         throw new Error(
-          "Wiki assets changed while the export was being created; start a new export",
+          "Wiki versions changed while the export was being created; start a new export",
         );
       }
-      const digest = new DigestStream("SHA-256");
-      const digestWriter = digest.getWriter();
+      const digest = createStreamingSha256();
       const reader = (object.body as ReadableStream<Uint8Array>).getReader();
       try {
         let result = await reader.read();
         while (!result.done) {
           written += result.value.byteLength;
           checksum.update(result.value);
-          await digestWriter.write(result.value);
+          await digest.update(result.value);
           yield result.value;
           result = await reader.read();
         }
-        await digestWriter.close();
-      } catch (error) {
-        await digestWriter.abort(error);
-        throw error;
       } finally {
         reader.releaseLock();
       }
-      const sha256 = bytesToHex(new Uint8Array(await digest.digest));
-      assetHashes.set(asset.sourceKey, sha256);
-      partAssetHashes.push({ sourceKey: asset.sourceKey, sha256 });
+      if ((await digest.hex()) !== version.contentHash) {
+        throw new Error(
+          `Page version ${version.id} content hash does not match`,
+        );
+      }
+    } else if (index < manifestIndex) {
+      const asset = requiredAt(plan.assets, index - versionEnd, "export asset");
+      const object = await bucket.get(asset.sourceKey);
+      if (object?.size !== asset.size || object.etag !== asset.etag) {
+        throw new Error(
+          "Wiki assets changed while the export was being created; start a new export",
+        );
+      }
+      const digest = createStreamingSha256();
+      const reader = (object.body as ReadableStream<Uint8Array>).getReader();
+      try {
+        let result = await reader.read();
+        while (!result.done) {
+          written += result.value.byteLength;
+          checksum.update(result.value);
+          await digest.update(result.value);
+          yield result.value;
+          result = await reader.read();
+        }
+      } finally {
+        reader.releaseLock();
+      }
+      const assetSha256 = await digest.hex();
+      assetHashes.set(asset.sourceKey, assetSha256);
+      partAssetHashes.push({ sourceKey: asset.sourceKey, sha256: assetSha256 });
     } else if (index === manifestIndex) {
       const data = encoder.encode(
         buildPortableManifest(manifestInput(plan), assetHashes),
@@ -848,6 +1089,59 @@ async function getExportWorkspaceName(
   return workspace.name;
 }
 
+async function listExportVersions(
+  database: D1Database,
+  bucket: R2Bucket,
+  workspaceId: string,
+): Promise<PortableExportVersion[]> {
+  const rows = await listWorkspaceRows<VersionRow>(
+    database,
+    workspaceId,
+    `SELECT v.id, v.page_id, v.revision, v.r2_key, v.content_hash,
+            v.author_id, v.reason, v.storage_status, v.created_at
+       FROM page_versions v
+       JOIN pages p ON p.id = v.page_id
+      WHERE p.workspace_id = ?1
+      ORDER BY v.id`,
+  );
+  const incomplete = rows.find((row) => row.storage_status !== "ready");
+  if (incomplete !== undefined) {
+    throw new Error(
+      `Page version ${incomplete.id} is not durably stored; retry after outbox reconciliation`,
+    );
+  }
+  const objects = await listR2Objects(bucket, `versions/${workspaceId}/`);
+  const byKey = new Map(objects.map((object) => [object.key, object]));
+  return rows.map((row) => {
+    const object = byKey.get(row.r2_key);
+    if (object === undefined) {
+      throw new Error(`Page version ${row.id} is missing from R2`);
+    }
+    if (object.size > MAX_EXPORT_OBJECT_BYTES) {
+      throw new Error(`Page version ${row.id} exceeds the export object limit`);
+    }
+    if (
+      object.customMetadata?.content_hash !== undefined &&
+      object.customMetadata.content_hash !== row.content_hash
+    ) {
+      throw new Error(`Page version ${row.id} has inconsistent R2 metadata`);
+    }
+    return {
+      id: row.id,
+      pageId: row.page_id,
+      revision: row.revision,
+      sourceKey: row.r2_key,
+      sourceEtag: object.etag,
+      contentHash: row.content_hash,
+      authorId: row.author_id,
+      reason: row.reason,
+      createdAt: row.created_at,
+      bodyBytes: object.size,
+      file: `versions/${row.id}.md`,
+    };
+  });
+}
+
 async function listExportMembers(
   database: D1Database,
   workspaceId: string,
@@ -886,6 +1180,9 @@ async function listExportAssets(
       include: ["httpMetadata", "customMetadata"],
     });
     for (const object of listing.objects) {
+      if (object.size > MAX_EXPORT_OBJECT_BYTES) {
+        throw new Error(`Asset ${object.key} exceeds the export object limit`);
+      }
       const relative = object.key.slice(prefix.length);
       const segments = relative.split("/");
       const filename = safeAssetFilename(segments.at(-1) ?? "asset");
@@ -904,12 +1201,33 @@ async function listExportAssets(
         ...(object.httpMetadata?.contentDisposition === undefined
           ? {}
           : { contentDisposition: object.httpMetadata.contentDisposition }),
-        customMetadata: object.customMetadata ?? {},
+        customMetadata: sortedRecord(object.customMetadata ?? {}),
       });
     }
     cursor = listing.truncated ? listing.cursor : undefined;
   } while (cursor !== undefined);
-  return result;
+  return result.sort((left, right) =>
+    left.sourceKey.localeCompare(right.sourceKey),
+  );
+}
+
+async function listR2Objects(
+  bucket: R2Bucket,
+  prefix: string,
+): Promise<R2Object[]> {
+  const result: R2Object[] = [];
+  let cursor: string | undefined;
+  do {
+    const listing = await bucket.list({
+      prefix,
+      limit: 1_000,
+      ...(cursor === undefined ? {} : { cursor }),
+      include: ["customMetadata"],
+    });
+    result.push(...listing.objects);
+    cursor = listing.truncated ? listing.cursor : undefined;
+  } while (cursor !== undefined);
+  return result.sort((left, right) => left.key.localeCompare(right.key));
 }
 
 async function listExportAcl(
@@ -1107,10 +1425,18 @@ async function loadPlan(
   key: string,
 ): Promise<StoredExportPlan> {
   const object = await bucket.get(key);
-  if (object === null || object.size > 32 * 1024 * 1024) {
+  if (object === null || object.size > MAX_EXPORT_PLAN_BYTES) {
     throw new Error("Export plan is unavailable or too large");
   }
   return storedPlanSchema.parse(await object.json<unknown>());
+}
+
+function sortedRecord(
+  value: Readonly<Record<string, string>>,
+): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(value).sort(([left], [right]) => left.localeCompare(right)),
+  );
 }
 
 function manifestInput(plan: StoredExportPlan): PortableManifestInput {
@@ -1121,6 +1447,7 @@ function manifestInput(plan: StoredExportPlan): PortableManifestInput {
     exportedAt: plan.exportedAt,
     members: plan.members,
     pages: plan.pages,
+    versions: plan.versions,
     assets: plan.assets,
     acl: plan.acl,
     tags: plan.tags,
@@ -1131,14 +1458,19 @@ function manifestInput(plan: StoredExportPlan): PortableManifestInput {
   };
 }
 
-function groupEntries(zip: ZipArchivePlan): { start: number; end: number }[] {
+export function groupEntries(
+  zip: ZipArchivePlan,
+): { start: number; end: number }[] {
   const groups: { start: number; end: number }[] = [];
   let start = 0;
   let size = 0;
   for (let index = 0; index < zip.entries.length; index += 1) {
     const entry = requiredAt(zip.entries, index, "ZIP entry");
     size += localRecordLength(entry.name, entry.size);
-    if (size >= TARGET_PART_BYTES) {
+    if (
+      size >= TARGET_PART_BYTES ||
+      index - start + 1 >= MAX_ENTRIES_PER_STAGE
+    ) {
       groups.push({ start, end: index + 1 });
       start = index + 1;
       size = 0;
@@ -1155,8 +1487,10 @@ function groupEntries(zip: ZipArchivePlan): { start: number; end: number }[] {
     const previous = groups.at(-2);
     if (previous === undefined)
       throw new Error("Previous export group is unavailable");
-    previous.end = last.end;
-    groups.pop();
+    if (last.end - previous.start <= MAX_ENTRIES_PER_STAGE) {
+      previous.end = last.end;
+      groups.pop();
+    }
   }
   return groups;
 }
@@ -1173,7 +1507,12 @@ function groupSize(
   return size;
 }
 
-function exportArtifactPrefix(parameters: ExportWorkflowParams): string {
+export function exportArtifactPrefix(
+  parameters: Pick<
+    ExportWorkflowParams,
+    "exportId" | "workspaceId" | "purpose" | "backupDate"
+  >,
+): string {
   const workspace = encodeURIComponent(parameters.workspaceId);
   if (parameters.purpose === "backup") {
     if (parameters.backupDate === null) {
@@ -1216,9 +1555,47 @@ async function hashR2Object(
   if (object?.size !== expectedSize) {
     throw new Error("Completed export archive is unavailable or incomplete");
   }
-  const digest = new DigestStream("SHA-256");
-  await object.body.pipeTo(digest);
-  return bytesToHex(new Uint8Array(await digest.digest));
+  const digest = createStreamingSha256();
+  const reader = (object.body as ReadableStream<Uint8Array>).getReader();
+  try {
+    let result = await reader.read();
+    while (!result.done) {
+      await digest.update(result.value);
+      result = await reader.read();
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return digest.hex();
+}
+
+interface StreamingSha256 {
+  update(value: Uint8Array): Promise<void>;
+  hex(): Promise<string>;
+}
+
+function createStreamingSha256(): StreamingSha256 {
+  if (typeof DigestStream !== "undefined") {
+    const stream = new DigestStream("SHA-256");
+    const writer = stream.getWriter();
+    return {
+      update: async (value) => writer.write(value),
+      hex: async () => {
+        await writer.close();
+        return bytesToHex(new Uint8Array(await stream.digest));
+      },
+    };
+  }
+  const fallback = sha256.create();
+  return {
+    update(value) {
+      fallback.update(value);
+      return Promise.resolve();
+    },
+    hex() {
+      return Promise.resolve(bytesToHex(fallback.digest()));
+    },
+  };
 }
 
 async function deleteR2Keys(
@@ -1228,6 +1605,22 @@ async function deleteR2Keys(
   for (let index = 0; index < keys.length; index += 1_000) {
     await bucket.delete(keys.slice(index, index + 1_000));
   }
+}
+
+async function deleteR2Prefix(
+  bucket: R2Bucket,
+  prefix: string,
+): Promise<number> {
+  let removed = 0;
+  let listing: R2Objects;
+  do {
+    listing = await bucket.list({ prefix, limit: 1_000 });
+    if (listing.objects.length > 0) {
+      await bucket.delete(listing.objects.map((object) => object.key));
+      removed += listing.objects.length;
+    }
+  } while (listing.truncated || listing.objects.length > 0);
+  return removed;
 }
 
 function range(start: number, end: number): number[] {

@@ -39,6 +39,23 @@ export const portableExportMemberSchema = z
   .strict();
 export type PortableExportMember = z.infer<typeof portableExportMemberSchema>;
 
+export const portableExportVersionSchema = z
+  .object({
+    id: z.string(),
+    pageId: z.string(),
+    revision: z.number().int().positive(),
+    sourceKey: z.string(),
+    sourceEtag: z.string(),
+    contentHash: sha256Schema,
+    authorId: z.string(),
+    reason: z.enum(["create", "edit", "move", "restore", "import", "manual"]),
+    createdAt: z.string(),
+    bodyBytes: z.number().int().nonnegative(),
+    file: portablePathSchema,
+  })
+  .strict();
+export type PortableExportVersion = z.infer<typeof portableExportVersionSchema>;
+
 export const portableExportAssetSchema = z
   .object({
     sourceKey: z.string(),
@@ -127,6 +144,7 @@ export interface PortableManifestInput {
   exportedAt: string;
   members: PortableExportMember[];
   pages: PortableExportPage[];
+  versions: PortableExportVersion[];
   assets: PortableExportAsset[];
   acl: PortableExportAcl[];
   tags: PortableExportTag[];
@@ -139,6 +157,10 @@ export interface PortableManifestInput {
 const PLACEHOLDER_SHA256 = "0".repeat(64);
 
 const portableManifestPageSchema = portableExportPageSchema
+  .omit({ bodyBytes: true })
+  .extend({ sha256: sha256Schema, size: z.number().int().nonnegative() })
+  .strict();
+const portableManifestVersionSchema = portableExportVersionSchema
   .omit({ bodyBytes: true })
   .extend({ sha256: sha256Schema, size: z.number().int().nonnegative() })
   .strict();
@@ -161,6 +183,7 @@ export const portableManifestSchema = z
       .object({
         members: z.number().int().nonnegative(),
         pages: z.number().int().nonnegative(),
+        versions: z.number().int().nonnegative(),
         assets: z.number().int().nonnegative(),
         acl: z.number().int().nonnegative(),
         tags: z.number().int().nonnegative(),
@@ -172,6 +195,7 @@ export const portableManifestSchema = z
       .strict(),
     members: z.array(portableExportMemberSchema),
     pages: z.array(portableManifestPageSchema),
+    versions: z.array(portableManifestVersionSchema),
     assets: z.array(portableManifestAssetSchema),
     acl: z.array(portableExportAclSchema),
     tags: z.array(portableExportTagSchema),
@@ -201,6 +225,7 @@ export function buildPortableManifest(
     counts: {
       members: input.members.length,
       pages: input.pages.length,
+      versions: input.versions.length,
       assets: input.assets.length,
       acl: input.acl.length,
       tags: input.tags.length,
@@ -227,6 +252,20 @@ export function buildPortableManifest(
       updatedAt: page.updatedAt,
       file: page.file,
       size: page.bodyBytes,
+    })),
+    versions: input.versions.map((version) => ({
+      id: version.id,
+      pageId: version.pageId,
+      revision: version.revision,
+      sourceKey: version.sourceKey,
+      sourceEtag: version.sourceEtag,
+      contentHash: version.contentHash,
+      sha256: version.contentHash,
+      authorId: version.authorId,
+      reason: version.reason,
+      createdAt: version.createdAt,
+      file: version.file,
+      size: version.bodyBytes,
     })),
     assets: input.assets.map((asset) => ({
       sourceKey: asset.sourceKey,
@@ -278,6 +317,7 @@ function validateManifestGraph(
 ): void {
   checkCount(manifest, "members", context);
   checkCount(manifest, "pages", context);
+  checkCount(manifest, "versions", context);
   checkCount(manifest, "assets", context);
   checkCount(manifest, "acl", context);
   checkCount(manifest, "tags", context);
@@ -337,6 +377,28 @@ function validateManifestGraph(
     context,
   );
   uniqueValues(
+    manifest.versions.map((version) => version.id),
+    ["versions"],
+    context,
+  );
+  uniqueValues(
+    manifest.versions.map((version) => version.sourceKey),
+    ["versions"],
+    context,
+  );
+  uniqueValues(
+    manifest.versions.map((version) => version.file),
+    ["versions"],
+    context,
+  );
+  uniqueValues(
+    manifest.versions.map(
+      (version) => `${version.pageId}\0${String(version.revision)}`,
+    ),
+    ["versions"],
+    context,
+  );
+  uniqueValues(
     manifest.assets.map((asset) => asset.file),
     ["assets"],
     context,
@@ -347,18 +409,35 @@ function validateManifestGraph(
     context,
   );
   const archivePaths = new Set<string>(["manifest.json"]);
+  const normalizedArchivePaths = new Set<string>(["manifest.json"]);
   for (const [index, file] of [
     ...manifest.pages.map((page) => page.file),
+    ...manifest.versions.map((version) => version.file),
     ...manifest.assets.map((asset) => asset.file),
   ].entries()) {
     if (archivePaths.has(file)) {
       context.addIssue({
         code: "custom",
         message: `Duplicate or reserved archive path: ${file}`,
-        path: [index < manifest.pages.length ? "pages" : "assets"],
+        path: [
+          index < manifest.pages.length
+            ? "pages"
+            : index < manifest.pages.length + manifest.versions.length
+              ? "versions"
+              : "assets",
+        ],
       });
     }
     archivePaths.add(file);
+    const normalizedFile = file.normalize("NFKC").toLowerCase();
+    if (normalizedArchivePaths.has(normalizedFile)) {
+      context.addIssue({
+        code: "custom",
+        message: `Archive paths collide after normalization: ${file}`,
+        path: ["pages"],
+      });
+    }
+    normalizedArchivePaths.add(normalizedFile);
   }
   for (const [index, page] of manifest.pages.entries()) {
     if (page.contentHash !== page.sha256) {
@@ -398,6 +477,50 @@ function validateManifestGraph(
     }
   }
   checkParentCycles(manifest.pages, context);
+  checkReferences(manifest.versions, "pageId", pageIds, "versions", context);
+  checkReferences(
+    manifest.versions,
+    "authorId",
+    memberIds,
+    "versions",
+    context,
+  );
+  const pagesById = new Map(manifest.pages.map((page) => [page.id, page]));
+  const versionsByPageRevision = new Map(
+    manifest.versions.map((version) => [
+      `${version.pageId}\0${String(version.revision)}`,
+      version,
+    ]),
+  );
+  for (const [index, version] of manifest.versions.entries()) {
+    if (version.contentHash !== version.sha256) {
+      context.addIssue({
+        code: "custom",
+        message: "Version contentHash and sha256 must match",
+        path: ["versions", index, "sha256"],
+      });
+    }
+    const page = pagesById.get(version.pageId);
+    if (page !== undefined && version.revision > page.revision) {
+      context.addIssue({
+        code: "custom",
+        message: "Version revision exceeds its current page revision",
+        path: ["versions", index, "revision"],
+      });
+    }
+  }
+  for (const [index, page] of manifest.pages.entries()) {
+    const currentVersion = versionsByPageRevision.get(
+      `${page.id}\0${String(page.revision)}`,
+    );
+    if (currentVersion?.contentHash !== page.contentHash) {
+      context.addIssue({
+        code: "custom",
+        message: "Current page revision is missing from version history",
+        path: ["pages", index, "revision"],
+      });
+    }
+  }
   checkReferences(manifest.acl, "pageId", pageIds, "acl", context);
   checkReferences(manifest.acl, "userId", memberIds, "acl", context);
   checkReferences(manifest.pageTags, "pageId", pageIds, "pageTags", context);
@@ -511,11 +634,15 @@ function checkParentCycles(
   context: z.RefinementCtx,
 ): void {
   const parents = new Map(pages.map((page) => [page.id, page.parentId]));
+  const complete = new Set<string>();
   for (const [index, page] of pages.entries()) {
-    const seen = new Set<string>();
+    if (complete.has(page.id)) continue;
+    const path: string[] = [];
+    const pathIndexes = new Map<string, number>();
     let current: string | null = page.id;
-    while (current !== null) {
-      if (seen.has(current)) {
+    while (current !== null && !complete.has(current)) {
+      const cycleStart = pathIndexes.get(current);
+      if (cycleStart !== undefined) {
         context.addIssue({
           code: "custom",
           message: "Page hierarchy contains a cycle",
@@ -523,14 +650,23 @@ function checkParentCycles(
         });
         break;
       }
-      seen.add(current);
+      pathIndexes.set(current, path.length);
+      path.push(current);
       current = parents.get(current) ?? null;
     }
+    for (const visited of path) complete.add(visited);
   }
 }
 
-function isPortablePath(value: string): boolean {
-  if (value.startsWith("/") || value.includes("\\")) return false;
+export function isPortablePath(value: string): boolean {
+  if (
+    value.startsWith("/") ||
+    value.includes("\\") ||
+    value.includes("\0") ||
+    /^[A-Za-z]:/u.test(value)
+  ) {
+    return false;
+  }
   const segments = value.split("/");
   return segments.every(
     (segment) => segment.length > 0 && segment !== "." && segment !== "..",

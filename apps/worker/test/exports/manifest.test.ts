@@ -59,6 +59,21 @@ describe("portable export manifest", () => {
           file: "pages/page-1.md",
         },
       ],
+      versions: [
+        {
+          id: "version-2",
+          pageId: "page-1",
+          revision: 2,
+          sourceKey: "versions/workspace-1/page-1/2.md",
+          sourceEtag: "version-etag",
+          contentHash: "a".repeat(64),
+          authorId: "owner-1",
+          reason: "edit",
+          createdAt: "2026-08-18T00:00:00.000Z",
+          bodyBytes: 6,
+          file: "versions/version-2.md",
+        },
+      ],
       assets: [
         {
           sourceKey: "assets/workspace-1/page-1/asset-1/figure.png",
@@ -119,7 +134,14 @@ describe("portable export manifest", () => {
 
     expect(manifest).toMatchObject({
       workspaceName: "Knowledge Base",
-      counts: { members: 2, pages: 1, assets: 1, acl: 1, links: 1 },
+      counts: {
+        members: 2,
+        pages: 1,
+        versions: 1,
+        assets: 1,
+        acl: 1,
+        links: 1,
+      },
       members: input.members,
       pages: [
         {
@@ -129,6 +151,7 @@ describe("portable export manifest", () => {
           size: 6,
         },
       ],
+      versions: [{ pageId: "page-1", revision: 2, sha256: "a".repeat(64) }],
       assets: [{ pageId: "page-1", sha256: hash }],
       acl: [{ userEmail: "viewer@example.com", permission: "viewer" }],
       tags: [{ normalizedName: "guide" }],
@@ -138,7 +161,7 @@ describe("portable export manifest", () => {
     });
   });
 
-  it("restores pages, assets, and links into an empty logical workspace", async () => {
+  it("restores pages, versions, assets, and links into an empty logical workspace", async () => {
     const pageBody = new TextEncoder().encode("# Home\n");
     const assetBody = new Uint8Array([1, 2, 3, 4]);
     const pageHash = await sha256(pageBody);
@@ -178,6 +201,21 @@ describe("portable export manifest", () => {
           file: "pages/home.md",
         },
       ],
+      versions: [
+        {
+          id: "home-version-1",
+          pageId: "home",
+          revision: 1,
+          sourceKey: "versions/source-workspace/home/1.md",
+          sourceEtag: "version-etag",
+          contentHash: pageHash,
+          authorId: "owner",
+          reason: "create",
+          createdAt: "2026-08-18T00:00:00.000Z",
+          bodyBytes: pageBody.byteLength,
+          file: "versions/home-version-1.md",
+        },
+      ],
       assets: [
         {
           sourceKey: "assets/source-workspace/home/image-1/image.png",
@@ -215,6 +253,7 @@ describe("portable export manifest", () => {
     );
     const files = [
       { name: input.pages[0]?.file ?? "", data: pageBody },
+      { name: input.versions[0]?.file ?? "", data: pageBody },
       { name: input.assets[0]?.file ?? "", data: assetBody },
       { name: "manifest.json", data: manifestBytes },
     ];
@@ -255,8 +294,21 @@ describe("portable export manifest", () => {
         }),
       ),
     );
+    const restoredVersions = new Map(
+      await Promise.all(
+        manifest.versions.map(async (version) => {
+          const body = requiredFile(extracted, version.file);
+          expect(await sha256(body)).toBe(version.sha256);
+          return [
+            `${version.pageId}:${String(version.revision)}`,
+            new TextDecoder().decode(body),
+          ] as const;
+        }),
+      ),
+    );
 
     expect(restoredPages).toEqual(new Map([["home", "# Home\n"]]));
+    expect(restoredVersions).toEqual(new Map([["home:1", "# Home\n"]]));
     expect(restoredAssets.size).toBe(1);
     expect(manifest.links).toMatchObject([
       { sourcePageId: "home", targetPageId: "home", rawTarget: "Home" },
@@ -282,6 +334,7 @@ describe("portable export manifest", () => {
               updatedAt: "2026-08-18T00:00:00.000Z",
             },
           ],
+          versions: [],
           pages: [
             {
               id: "page",
