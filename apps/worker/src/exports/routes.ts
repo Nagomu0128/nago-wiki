@@ -2,8 +2,7 @@ import type { AuthenticatedIdentity } from "@nago-wiki/shared";
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 
-import type { ExportWorkflowParams } from "./workflow";
-import { createUuidV7 } from "../core/ids";
+import { startPortableExport } from "./service";
 import type { McpRuntimeEnv } from "../mcp/types";
 
 interface ExportApi {
@@ -36,41 +35,11 @@ export function createExportRoutes(): Hono<ExportApi> {
   routes.post("/exports", async (context) => {
     const identity = requireExportIdentity(context.get("identity"));
     await requireOwner(context.env.DB, identity);
-    const exportId = createUuidV7();
-    const now = new Date().toISOString();
-    await context.env.DB.batch([
-      context.env.DB.prepare(
-        `INSERT INTO exports (
-           id, workspace_id, user_id, status, created_at, updated_at
-         ) VALUES (?1, ?2, ?3, 'queued', ?4, ?4)`,
-      ).bind(exportId, identity.workspaceId, identity.id, now),
-      context.env.DB.prepare(
-        `INSERT INTO audit_events (
-           id, actor_id, action, target_type, target_id, metadata_json, created_at
-         ) VALUES (?1, ?2, 'export.started', 'export', ?3, '{}', ?4)`,
-      ).bind(createUuidV7(), identity.id, exportId, now),
-    ]);
-
-    const parameters: ExportWorkflowParams = {
-      exportId,
+    const result = await startPortableExport(context.env, {
       workspaceId: identity.workspaceId,
       requestedBy: identity.id,
-    };
-    try {
-      await context.env.EXPORT_WORKFLOW.create({
-        id: `export-${exportId}`,
-        params: parameters,
-        retention: { successRetention: "7 days", errorRetention: "30 days" },
-      });
-    } catch (error) {
-      await context.env.DB.prepare(
-        `UPDATE exports SET status = 'failed', updated_at = ?2 WHERE id = ?1`,
-      )
-        .bind(exportId, new Date().toISOString())
-        .run();
-      throw error;
-    }
-    return context.json({ id: exportId, status: "queued" as const }, 202);
+    });
+    return context.json({ id: result.id, status: result.status }, 202);
   });
 
   routes.get("/exports/:id", async (context) => {

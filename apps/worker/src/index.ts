@@ -17,6 +17,10 @@ import { D1WikiRepository } from "./core/repository";
 import { consumeAsyncJobs } from "./jobs/consumer";
 import { reconcilePendingJobs } from "./jobs/reconcile";
 import { createExportRoutes } from "./exports/routes";
+import {
+  runWeeklyBackupMaintenance,
+  WEEKLY_BACKUP_CRON,
+} from "./exports/service";
 import { createImportRoutes } from "./imports/routes";
 import { createMcpOAuthProvider } from "./mcp/oauth";
 import { isMcpOAuthPath } from "./mcp/security";
@@ -122,12 +126,16 @@ export default {
     return app.fetch(request, environment, context);
   },
   queue: consumeAsyncJobs,
-  scheduled(_controller, environment, context) {
+  scheduled(controller, environment, context) {
+    const tasks: Promise<unknown>[] = [
+      reconcilePendingJobs(environment),
+      environment.DISCORD_GATEWAY.getByName("gateway").start(),
+    ];
+    if (controller.cron === WEEKLY_BACKUP_CRON) {
+      tasks.push(runWeeklyBackupMaintenance(environment));
+    }
     context.waitUntil(
-      Promise.all([
-        reconcilePendingJobs(environment),
-        environment.DISCORD_GATEWAY.getByName("gateway").start(),
-      ]).then(() => undefined),
+      Promise.all(tasks).then(() => undefined),
     );
   },
 } satisfies ExportedHandler<McpRuntimeEnv>;
