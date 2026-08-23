@@ -334,7 +334,7 @@ kbd {
 .search-field:focus-within { border-color: #6e9a90; box-shadow: 0 0 0 3px rgb(49 127 113 / 12%); }
 
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
-.explore-panel, .activity-panel, .import-panel, .account-link-panel { padding: 18px 18px 48px; }
+.explore-panel, .activity-panel, .import-panel, .account-link-panel, .settings-panel { padding: 18px 18px 48px; }
 .explore-tabs { width: max-content; }
 .explore-intro { padding: 28px 2px 18px; }
 .drawer-eyebrow, .drawer-section-title > span { display: block; color: #42685e; font-size: 9px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
@@ -477,6 +477,42 @@ kbd {
 .account-link-result > button { justify-self: start; }
 .account-link-result ol { margin: 0; padding-left: 18px; color: var(--muted); font-size: 9.5px; line-height: 1.7; }
 .account-link-note { margin-top: 14px; color: var(--faint); font-size: 9px; line-height: 1.6; }
+.account-link-compact .account-link-providers { margin-top: 8px; }
+
+.settings-section { padding: 18px 0; border-bottom: 1px solid var(--line-soft); }
+.settings-section:last-child { border-bottom: 0; }
+.settings-section > h3 { margin: 0 0 11px; font-size: 11px; letter-spacing: .02em; }
+.settings-muted, .settings-owner-note { margin: 8px 0; color: var(--muted); font-size: 9.5px; line-height: 1.6; }
+.settings-owner-note { padding: 12px; border-radius: 8px; background: var(--paper); }
+.settings-list { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.settings-list li { display: flex; align-items: center; gap: 6px; padding: 8px; border: 1px solid var(--line-soft); border-radius: 7px; background: var(--paper); }
+.settings-list li > span:first-child, .member-summary { min-width: 0; margin-inline-end: auto; }
+.settings-list strong, .settings-list small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.settings-list strong { font-size: 9.5px; }
+.settings-list small { margin-top: 2px; color: var(--faint); font-size: 8px; }
+.settings-list button, .settings-list select, .acl-members select, .bot-provider button { min-height: 28px; padding: 4px 6px; border: 1px solid var(--line); border-radius: 5px; background: transparent; font-size: 8.5px; }
+.member-list li { display: grid; grid-template-columns: minmax(90px, 1fr) auto auto auto; }
+.member-list .drawer-error { grid-column: 1 / -1; }
+.acl-members, .channel-create { display: grid; gap: 7px; margin: 0; padding: 0; border: 0; }
+.acl-members legend, .channel-create legend { margin-bottom: 6px; color: var(--muted); font-size: 9px; }
+.acl-members > label { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 7px 2px; border-bottom: 1px solid var(--line-soft); }
+.acl-members strong, .acl-members small { display: block; }
+.acl-members strong { font-size: 9.5px; }
+.acl-members small { margin-top: 2px; color: var(--faint); font-size: 8px; }
+.settings-save { justify-self: end; margin-top: 7px; }
+.bot-settings { display: grid; gap: 12px; }
+.bot-provider > div { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; font-size: 10px; }
+.bot-provider > div button[aria-pressed="true"] { color: #315e56; border-color: #a9c4bc; background: #e4eeea; }
+.channel-list li > span { min-width: 0; }
+.channel-create { padding: 10px; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--paper); }
+.channel-create label { display: grid; gap: 4px; color: var(--muted); font-size: 8.5px; }
+.channel-create input, .channel-create select { min-width: 0; padding: 7px; border: 1px solid var(--line); border-radius: 5px; background: var(--paper-raised); font-size: 9px; }
+.channel-create .button { justify-self: end; }
+
+@media (max-width: 460px) {
+  .member-list li { grid-template-columns: 1fr 1fr; }
+  .member-summary { grid-column: 1 / -1; }
+}
 
 .notice { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; margin: 24px; padding: 14px; border: 1px solid var(--line); border-radius: 9px; font-size: 12px; }
 .notice div, .notice strong, .notice span, .notice small { display: block; }

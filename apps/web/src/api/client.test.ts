@@ -43,4 +43,17 @@ describe("HttpWikiApi", () => {
       source: { type: "google_docs", documentId: "document-1" },
     }));
   });
+
+  it("encodes bot channel ids and sends owner control mutations", async () => {
+    const fetchMock = vi.fn(() => Promise.resolve(new Response(null, { status: 204 })));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = new HttpWikiApi("https://wiki.example/api/v1");
+
+    await api.deleteBotChannel("discord", "team / private");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://wiki.example/api/v1/admin/bot-channels/discord/team%20%2F%20private",
+      expect.objectContaining({ method: "DELETE", credentials: "same-origin" }),
+    );
+  });
 });
