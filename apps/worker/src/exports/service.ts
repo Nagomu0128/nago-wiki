@@ -142,7 +142,7 @@ export async function reconcileQueuedPortableExports(
             backup_date, status
        FROM exports
       WHERE status IN ('queued', 'running') AND updated_at <= ?1
-      ORDER BY updated_at, id
+      ORDER BY CASE status WHEN 'queued' THEN 0 ELSE 1 END, updated_at, id
       LIMIT 100`,
   )
     .bind(cutoff)
@@ -155,9 +155,21 @@ export async function reconcileQueuedPortableExports(
         environment.EXPORT_WORKFLOW,
         rowParameters(row),
       );
+      await environment.DB.prepare(
+        `UPDATE exports SET updated_at = ?2
+          WHERE id = ?1 AND status IN ('queued', 'running')`,
+      )
+        .bind(row.id, now.toISOString())
+        .run();
       resumed += 1;
     } catch (error) {
       failed += 1;
+      await environment.DB.prepare(
+        `UPDATE exports SET updated_at = ?2
+          WHERE id = ?1 AND status IN ('queued', 'running')`,
+      )
+        .bind(row.id, now.toISOString())
+        .run();
       console.error("Failed to reconcile queued export", {
         exportId: row.id,
         error: error instanceof Error ? error.message : "Unknown error",

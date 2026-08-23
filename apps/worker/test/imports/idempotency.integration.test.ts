@@ -213,7 +213,7 @@ describe("POST /imports idempotency", () => {
          id, workspace_id, user_id, source_type, source_metadata_json,
          workflow_source_json, status, created_at, updated_at
        ) VALUES (
-         'legacy-queued-import', ?1, ?2, 'paste', '{}', NULL, 'queued', ?3, ?3
+         'legacy-queued-import', ?1, ?2, 'paste', '{}', NULL, 'running', ?3, ?3
        )`,
     )
       .bind(identity.workspaceId, identity.id, "2026-08-23T00:00:00.000Z")

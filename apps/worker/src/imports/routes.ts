@@ -526,7 +526,7 @@ export async function reconcileQueuedImports(
             created_at, updated_at, expires_at
        FROM imports
       WHERE status IN ('queued', 'running') AND updated_at <= ?1
-      ORDER BY updated_at, id
+      ORDER BY CASE status WHEN 'queued' THEN 0 ELSE 1 END, updated_at, id
       LIMIT 100`,
   )
     .bind(cutoff)
@@ -548,7 +548,7 @@ export async function reconcileQueuedImports(
                   'Import workflow cannot be resumed after migration'
                 ),
                 updated_at = ?2, expires_at = ?3
-          WHERE id = ?1 AND status = 'queued'`,
+          WHERE id = ?1 AND status IN ('queued', 'running')`,
       )
         .bind(
           row.id,
@@ -561,9 +561,21 @@ export async function reconcileQueuedImports(
     }
     try {
       await resumeImportWorkflow(environment, row);
+      await environment.DB.prepare(
+        `UPDATE imports SET updated_at = ?2
+          WHERE id = ?1 AND status IN ('queued', 'running')`,
+      )
+        .bind(row.id, now.toISOString())
+        .run();
       resumed += 1;
     } catch (error) {
       failed += 1;
+      await environment.DB.prepare(
+        `UPDATE imports SET updated_at = ?2
+          WHERE id = ?1 AND status IN ('queued', 'running')`,
+      )
+        .bind(row.id, now.toISOString())
+        .run();
       console.error("Failed to reconcile queued import", {
         importId: row.id,
         error: error instanceof Error ? error.message : "Unknown error",
