@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
+import { unzipSync } from "fflate";
 
 import {
   buildCentralDirectory,
   buildStoredLocalRecord,
   crc32,
+  planR2MultipartUpload,
   planStoredZip,
 } from "../../src/exports/zip";
 
@@ -12,7 +14,9 @@ const encoder = new TextEncoder();
 describe("stored ZIP writer", () => {
   it("creates a standards-shaped archive with data descriptors", () => {
     const data = encoder.encode("hello");
-    const plan = planStoredZip([{ name: "pages/hello.md", size: data.byteLength }]);
+    const plan = planStoredZip([
+      { name: "pages/hello.md", size: data.byteLength },
+    ]);
     const crc = crc32(data);
     const local = buildStoredLocalRecord(entryAt(plan.entries, 0), data);
     const central = buildCentralDirectory(
@@ -28,6 +32,9 @@ describe("stored ZIP writer", () => {
     expect(view.getUint32(archive.byteLength - 22, true)).toBe(0x06054b50);
     expect(view.getUint32(plan.centralOffset + 16, true)).toBe(crc);
     expect(crc).toBe(0x3610a686);
+    expect(new TextDecoder().decode(unzipSync(archive)["pages/hello.md"])).toBe(
+      "hello",
+    );
   });
 
   it("counts UTF-8 filenames and empty bodies exactly", () => {
@@ -35,7 +42,10 @@ describe("stored ZIP writer", () => {
       { name: "pages/日本語.md", size: 0 },
       { name: "manifest.json", size: 2 },
     ]);
-    const first = buildStoredLocalRecord(entryAt(plan.entries, 0), new Uint8Array());
+    const first = buildStoredLocalRecord(
+      entryAt(plan.entries, 0),
+      new Uint8Array(),
+    );
     const secondData = encoder.encode("{}");
     const second = buildStoredLocalRecord(entryAt(plan.entries, 1), secondData);
     const central = buildCentralDirectory(
@@ -92,6 +102,29 @@ describe("stored ZIP writer", () => {
     expect(() =>
       planStoredZip([{ name: "unsupported.bin", size: 0xffff_ffff }]),
     ).toThrow("ZIP entry size is not supported");
+  });
+
+  it("plans uniform R2 multipart chunks with only the final part smaller", () => {
+    const mebibyte = 1024 * 1024;
+    const plan = planR2MultipartUpload(12 * mebibyte);
+
+    expect(plan.partSize).toBe(5 * mebibyte);
+    expect(plan.parts).toEqual([
+      { offset: 0, size: 5 * mebibyte },
+      { offset: 5 * mebibyte, size: 5 * mebibyte },
+      { offset: 10 * mebibyte, size: 2 * mebibyte },
+    ]);
+  });
+
+  it("increases multipart part size before exceeding 10,000 parts", () => {
+    const archiveSize = 5 * 1024 * 1024 * 10_000 + 1;
+    const plan = planR2MultipartUpload(archiveSize);
+
+    expect(plan.parts).toHaveLength(10_000);
+    expect(plan.partSize).toBeGreaterThan(5 * 1024 * 1024);
+    expect(plan.parts.slice(0, -1).every((part) => part.size === plan.partSize)).toBe(
+      true,
+    );
   });
 });
 

@@ -8,6 +8,9 @@ const ZIP64_END_OF_CENTRAL_DIRECTORY_SIGNATURE = 0x06064b50;
 const ZIP64_END_OF_CENTRAL_DIRECTORY_LOCATOR_SIGNATURE = 0x07064b50;
 const UTF8_WITH_DATA_DESCRIPTOR = 0x0808;
 const ZIP32_MAX = 0xffff_ffffn;
+const R2_MIN_MULTIPART_PART_BYTES = 5 * 1024 * 1024;
+const R2_MAX_MULTIPART_PART_BYTES = 5 * 1024 * 1024 * 1024;
+const R2_MAX_MULTIPART_PARTS = 10_000;
 
 export interface ZipEntryPlan {
   name: string;
@@ -20,6 +23,38 @@ export interface ZipArchivePlan {
   centralOffset: number;
   centralSize: number;
   archiveSize: number;
+}
+
+export interface MultipartPartPlan {
+  offset: number;
+  size: number;
+}
+
+export interface MultipartUploadPlan {
+  partSize: number;
+  parts: MultipartPartPlan[];
+}
+
+export function planR2MultipartUpload(archiveSize: number): MultipartUploadPlan {
+  if (!Number.isSafeInteger(archiveSize) || archiveSize <= 0) {
+    throw new Error("Multipart archive size must be a positive safe integer");
+  }
+  const requiredPartSize = Math.ceil(archiveSize / R2_MAX_MULTIPART_PARTS);
+  const partSize = Math.max(
+    R2_MIN_MULTIPART_PART_BYTES,
+    requiredPartSize,
+  );
+  if (partSize > R2_MAX_MULTIPART_PART_BYTES) {
+    throw new Error("Export archive exceeds the multipart upload limit");
+  }
+  const partCount = Math.ceil(archiveSize / partSize);
+  return {
+    partSize,
+    parts: Array.from({ length: partCount }, (_, index) => ({
+      offset: index * partSize,
+      size: Math.min(partSize, archiveSize - index * partSize),
+    })),
+  };
 }
 
 export function planStoredZip(
@@ -62,8 +97,16 @@ export function buildStoredLocalRecord(
   if (data.byteLength !== entry.size) {
     throw new Error(`ZIP entry size changed for ${entry.name}`);
   }
+  return concatenate([
+    buildStoredLocalHeader(entry),
+    data,
+    buildStoredDataDescriptor(entry, knownCrc32),
+  ]);
+}
+
+export function buildStoredLocalHeader(entry: ZipEntryPlan): Uint8Array {
   const name = encoder.encode(entry.name);
-  const output = new Uint8Array(30 + name.byteLength + data.byteLength + 16);
+  const output = new Uint8Array(30 + name.byteLength);
   const view = new DataView(output.buffer);
   writeUint32(view, 0, LOCAL_FILE_HEADER_SIGNATURE);
   writeUint16(view, 4, 20);
@@ -77,12 +120,19 @@ export function buildStoredLocalRecord(
   writeUint16(view, 26, name.byteLength);
   writeUint16(view, 28, 0);
   output.set(name, 30);
-  output.set(data, 30 + name.byteLength);
-  const descriptorOffset = 30 + name.byteLength + data.byteLength;
-  writeUint32(view, descriptorOffset, DATA_DESCRIPTOR_SIGNATURE);
-  writeUint32(view, descriptorOffset + 4, knownCrc32);
-  writeUint32(view, descriptorOffset + 8, data.byteLength);
-  writeUint32(view, descriptorOffset + 12, data.byteLength);
+  return output;
+}
+
+export function buildStoredDataDescriptor(
+  entry: ZipEntryPlan,
+  knownCrc32: number,
+): Uint8Array {
+  const output = new Uint8Array(16);
+  const view = new DataView(output.buffer);
+  writeUint32(view, 0, DATA_DESCRIPTOR_SIGNATURE);
+  writeUint32(view, 4, knownCrc32);
+  writeUint32(view, 8, entry.size);
+  writeUint32(view, 12, entry.size);
   return output;
 }
 
@@ -95,10 +145,13 @@ export function buildCentralDirectory(
   let offset = 0;
   for (const entry of plan.entries) {
     const crc = crcByName.get(entry.name);
-    if (crc === undefined) throw new Error(`Missing CRC for ZIP entry ${entry.name}`);
+    if (crc === undefined)
+      throw new Error(`Missing CRC for ZIP entry ${entry.name}`);
     const name = encoder.encode(entry.name);
     const needsZip64Offset = BigInt(entry.localOffset) >= ZIP32_MAX;
-    const extra = needsZip64Offset ? zip64OffsetExtra(entry.localOffset) : new Uint8Array();
+    const extra = needsZip64Offset
+      ? zip64OffsetExtra(entry.localOffset)
+      : new Uint8Array();
     writeUint32(view, offset, CENTRAL_DIRECTORY_SIGNATURE);
     writeUint16(view, offset + 4, needsZip64Offset ? 45 : 20);
     writeUint16(view, offset + 6, needsZip64Offset ? 45 : 20);
@@ -129,11 +182,23 @@ export function buildCentralDirectory(
 }
 
 export function crc32(value: Uint8Array): number {
-  let crc = 0xffff_ffff;
-  for (const byte of value) {
-    crc = tableValue((crc ^ byte) & 0xff) ^ (crc >>> 8);
+  return new Crc32().update(value).digest();
+}
+
+export class Crc32 {
+  #value = 0xffff_ffff;
+
+  public update(value: Uint8Array): this {
+    for (const byte of value) {
+      this.#value =
+        tableValue((this.#value ^ byte) & 0xff) ^ (this.#value >>> 8);
+    }
+    return this;
   }
-  return (crc ^ 0xffff_ffff) >>> 0;
+
+  public digest(): number {
+    return (this.#value ^ 0xffff_ffff) >>> 0;
+  }
 }
 
 function tableValue(index: number): number {
@@ -191,7 +256,11 @@ function writeEndRecords(
   writeUint16(view, offset + 8, Math.min(plan.entries.length, 0xffff));
   writeUint16(view, offset + 10, Math.min(plan.entries.length, 0xffff));
   writeUint32(view, offset + 12, Math.min(plan.centralSize, Number(ZIP32_MAX)));
-  writeUint32(view, offset + 16, Math.min(plan.centralOffset, Number(ZIP32_MAX)));
+  writeUint32(
+    view,
+    offset + 16,
+    Math.min(plan.centralOffset, Number(ZIP32_MAX)),
+  );
   writeUint16(view, offset + 20, 0);
 }
 
@@ -217,14 +286,19 @@ function validateEntry(file: { name: string; size: number }): void {
   if (nameLength === 0 || nameLength > 0xffff) {
     throw new Error("ZIP entry name must contain 1 to 65535 UTF-8 bytes");
   }
-  if (!Number.isSafeInteger(file.size) || file.size < 0 || file.size >= Number(ZIP32_MAX)) {
+  if (
+    !Number.isSafeInteger(file.size) ||
+    file.size < 0 ||
+    file.size >= Number(ZIP32_MAX)
+  ) {
     throw new Error(`ZIP entry size is not supported for ${file.name}`);
   }
 }
 
 function safeNumber(value: bigint): number {
   const result = Number(value);
-  if (!Number.isSafeInteger(result)) throw new Error("ZIP archive exceeds safe size");
+  if (!Number.isSafeInteger(result))
+    throw new Error("ZIP archive exceeds safe size");
   return result;
 }
 
@@ -238,6 +312,17 @@ function writeUint32(view: DataView, offset: number, value: number): void {
 
 function writeUint64(view: DataView, offset: number, value: bigint): void {
   view.setBigUint64(offset, value, true);
+}
+
+function concatenate(chunks: readonly Uint8Array[]): Uint8Array {
+  const size = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+  const result = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    result.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return result;
 }
 
 const CRC32_TABLE = (() => {
