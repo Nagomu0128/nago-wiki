@@ -199,6 +199,13 @@ export interface WikiApi {
   movePage(id: string, input: MovePageInput, signal?: AbortSignal): Promise<PageResource>;
   trashPage(id: string, signal?: AbortSignal): Promise<{ status: "trashed"; pageIds: string[] }>;
   restorePage(id: string, signal?: AbortSignal): Promise<PageResource>;
+  getRecentPages(signal?: AbortSignal): Promise<RecentPageItem[]>;
+  getFavoritePages(signal?: AbortSignal): Promise<FavoritePageItem[]>;
+  getTrashedPages(signal?: AbortSignal): Promise<TrashedPageItem[]>;
+  recordPageView(id: string, signal?: AbortSignal): Promise<void>;
+  setFavorite(id: string, favorite: boolean, signal?: AbortSignal): Promise<boolean>;
+  replacePageTags(id: string, names: string[], signal?: AbortSignal): Promise<WikiTag[]>;
+  getBacklinks(id: string, signal?: AbortSignal): Promise<BacklinkPage[]>;
   getComments(pageId: string, signal?: AbortSignal): Promise<PageComment[]>;
   createComment(pageId: string, bodyMd: string, signal?: AbortSignal): Promise<PageComment>;
   getVersions(pageId: string, signal?: AbortSignal): Promise<PageVersion[]>;
@@ -212,3 +219,20 @@ export interface WikiApi {
   applyImport(id: string, input: ApplyImportInput, signal?: AbortSignal): Promise<PageResource>;
   createAccountLink(provider: BotProvider, signal?: AbortSignal): Promise<AccountLinkCode>;
 }
+import type {
+  BacklinkPage,
+  FavoritePageItem,
+  PageNavigationItem,
+  RecentPageItem,
+  TrashedPageItem,
+  WikiTag,
+} from "@nago-wiki/shared";
+
+export type {
+  BacklinkPage,
+  FavoritePageItem,
+  PageNavigationItem,
+  RecentPageItem,
+  TrashedPageItem,
+  WikiTag,
+};

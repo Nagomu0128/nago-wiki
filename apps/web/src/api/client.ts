@@ -3,20 +3,25 @@ import type {
   AccountLinkCode,
   ApiErrorBody,
   ApplyImportInput,
+  BacklinkPage,
   CreatePageInput,
   ImportJob,
   ImportRequest,
   GooglePickerConfiguration,
+  FavoritePageItem,
   MeResponse,
   MovePageInput,
   PageComment,
   PageResource,
   PageTreeNode,
   PageVersion,
+  RecentPageItem,
   SearchRequest,
   SearchResponse,
   UpdatePageInput,
+  TrashedPageItem,
   WikiApi,
+  WikiTag,
   BotProvider,
 } from "./types";
 
@@ -138,6 +143,47 @@ export class HttpWikiApi implements WikiApi {
 
   restorePage(id: string, signal?: AbortSignal) {
     return this.request<PageResource>(`/pages/${encodeURIComponent(id)}/restore`, { method: "POST", signal: signal ?? null });
+  }
+
+  async getRecentPages(signal?: AbortSignal) {
+    const response = await this.request<{ pages: RecentPageItem[] }>("/recent", { signal: signal ?? null });
+    return response.pages;
+  }
+
+  async getFavoritePages(signal?: AbortSignal) {
+    const response = await this.request<{ pages: FavoritePageItem[] }>("/favorites", { signal: signal ?? null });
+    return response.pages;
+  }
+
+  async getTrashedPages(signal?: AbortSignal) {
+    const response = await this.request<{ pages: TrashedPageItem[] }>("/trash", { signal: signal ?? null });
+    return response.pages;
+  }
+
+  async recordPageView(id: string, signal?: AbortSignal) {
+    await this.request<undefined>(`/pages/${encodeURIComponent(id)}/view`, { method: "POST", signal: signal ?? null });
+  }
+
+  async setFavorite(id: string, favorite: boolean, signal?: AbortSignal) {
+    const response = await this.request<{ favorite: boolean }>(`/pages/${encodeURIComponent(id)}/favorite`, {
+      method: favorite ? "PUT" : "DELETE",
+      signal: signal ?? null,
+    });
+    return response.favorite;
+  }
+
+  async replacePageTags(id: string, names: string[], signal?: AbortSignal) {
+    const response = await this.request<{ tags: WikiTag[] }>(`/pages/${encodeURIComponent(id)}/tags`, {
+      method: "PUT",
+      body: JSON.stringify({ names }),
+      signal: signal ?? null,
+    });
+    return response.tags;
+  }
+
+  async getBacklinks(id: string, signal?: AbortSignal) {
+    const response = await this.request<{ pages: BacklinkPage[] }>(`/pages/${encodeURIComponent(id)}/backlinks`, { signal: signal ?? null });
+    return response.pages;
   }
 
   async getComments(pageId: string, signal?: AbortSignal) {

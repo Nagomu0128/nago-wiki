@@ -475,6 +475,10 @@ describe("D1 wiki core", () => {
         expect.objectContaining({ name: "Cloudflare" }),
       ]),
     );
+
+    await expect(
+      tags.listVisible({ ...viewer, status: "suspended" }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN", status: 403 });
   });
 
   it("provisions a verified Access identity once as a viewer", async () => {
