@@ -41,6 +41,7 @@ describe("bot account link audit", () => {
         "discord",
         "sensitive-discord-subject-1234",
         issued.code,
+        DEFAULT_WORKSPACE_ID,
       ),
     ).resolves.toBe(true);
     await expect(
@@ -49,6 +50,7 @@ describe("bot account link audit", () => {
         "discord",
         "sensitive-discord-subject-1234",
         issued.code,
+        DEFAULT_WORKSPACE_ID,
       ),
     ).resolves.toBe(false);
 
@@ -80,16 +82,34 @@ describe("bot account link audit", () => {
   it("does not audit a failed link or an existing identity no-op", async () => {
     const wrongProvider = await issueAccountLinkCode(env.DB, userId, "line");
     await expect(
-      consumeAccountLinkCode(env.DB, "discord", "discord-subject", wrongProvider.code),
+      consumeAccountLinkCode(
+        env.DB,
+        "discord",
+        "discord-subject",
+        wrongProvider.code,
+        DEFAULT_WORKSPACE_ID,
+      ),
     ).resolves.toBe(false);
 
     const first = await issueAccountLinkCode(env.DB, userId, "discord");
     const second = await issueAccountLinkCode(env.DB, userId, "discord");
     await expect(
-      consumeAccountLinkCode(env.DB, "discord", "discord-subject", first.code),
+      consumeAccountLinkCode(
+        env.DB,
+        "discord",
+        "discord-subject",
+        first.code,
+        DEFAULT_WORKSPACE_ID,
+      ),
     ).resolves.toBe(true);
     await expect(
-      consumeAccountLinkCode(env.DB, "discord", "discord-subject", second.code),
+      consumeAccountLinkCode(
+        env.DB,
+        "discord",
+        "discord-subject",
+        second.code,
+        DEFAULT_WORKSPACE_ID,
+      ),
     ).resolves.toBe(true);
 
     const count = await env.DB.prepare(
