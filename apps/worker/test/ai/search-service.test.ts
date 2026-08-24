@@ -35,8 +35,46 @@ describe("WikiSearchService", () => {
     });
 
     expect(result.results.map((value) => value.pageId)).toEqual(["page-1"]);
-    expect(result.candidateCount).toBe(2);
+    expect(result.candidateCount).toBe(1);
     expect(authorize).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not expose whether a keyword matched an unauthorized page", async () => {
+    const authorize = vi
+      .fn<SearchCandidateAuthorizer["authorize"]>()
+      .mockResolvedValue(null);
+    const hiddenMatch = new WikiSearchService(
+      {
+        search: vi.fn<AiSearchClient["search"]>().mockResolvedValue({
+          chunks: [candidate("hidden-secret", "restricted-page", "hash-1", 1)],
+        }),
+      },
+      { authorize },
+    );
+    const noMatch = new WikiSearchService(
+      {
+        search: vi.fn<AiSearchClient["search"]>().mockResolvedValue({ chunks: [] }),
+      },
+      { authorize },
+    );
+    const request = {
+      query: "classified project codename",
+      workspaceId: "workspace-1",
+      mode: "keyword" as const,
+      limit: 20,
+    };
+
+    const [hiddenResponse, emptyResponse] = await Promise.all([
+      hiddenMatch.search("user-1", request),
+      noMatch.search("user-1", request),
+    ]);
+
+    expect(hiddenResponse).toEqual(emptyResponse);
+    expect(hiddenResponse).toEqual({
+      query: request.query,
+      results: [],
+      candidateCount: 0,
+    });
   });
 
   it("expands retrieval when ACL filtering leaves too few results", async () => {

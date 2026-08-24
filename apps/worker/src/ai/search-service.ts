@@ -100,7 +100,7 @@ export class WikiSearchService {
     return {
       query: request.query,
       results,
-      candidateCount: uniqueCandidates.size,
+      candidateCount: [...authorized.values()].filter((value) => value !== null).length,
     };
   }
 }
