@@ -28,16 +28,13 @@ interface MemberRow extends Record<string, unknown> {
   updated_at: string;
 }
 
-interface AclRow extends Record<string, unknown> {
-  user_id: string;
-  display_name: string;
-  email: string;
-  permission: "editor" | "viewer";
-}
-
-interface AclRevisionRow extends Record<string, unknown> {
+interface AclSnapshotRow extends Record<string, unknown> {
   revision: number;
-  updated_at: string;
+  updated_at: string | null;
+  user_id: string | null;
+  display_name: string | null;
+  email: string | null;
+  permission: "editor" | "viewer" | null;
 }
 
 interface AclMemberRow extends Record<string, unknown> {
@@ -175,34 +172,32 @@ export class AdminService {
     pageId: string,
   ): Promise<PageAclResponse> {
     await this.requireRestrictedPageOwner(identity, pageId);
-    const [acl, revision] = await Promise.all([
-      this.database
-        .prepare(
-          `SELECT acl.user_id, users.display_name, users.email, acl.permission
-             FROM page_acl AS acl
-             JOIN users ON users.id = acl.user_id
-            WHERE acl.page_id = ?1 AND users.workspace_id = ?2
-            ORDER BY users.display_name COLLATE NOCASE, users.id`,
-        )
-        .bind(pageId, identity.workspaceId)
-        .all<AclRow>(),
-      this.database
-        .prepare(
-          `SELECT revision, updated_at FROM page_acl_revisions WHERE page_id = ?1`,
-        )
-        .bind(pageId)
-        .first<AclRevisionRow>(),
-    ]);
+    const snapshot = await this.database
+      .prepare(
+        `SELECT coalesce(revisions.revision, 0) AS revision, revisions.updated_at,
+                acl.user_id, users.display_name, users.email, acl.permission
+           FROM (SELECT ?1 AS page_id) AS target
+           LEFT JOIN page_acl_revisions AS revisions ON revisions.page_id = target.page_id
+           LEFT JOIN page_acl AS acl ON acl.page_id = target.page_id
+           LEFT JOIN users ON users.id = acl.user_id AND users.workspace_id = ?2
+          ORDER BY users.display_name COLLATE NOCASE, users.id`,
+      )
+      .bind(pageId, identity.workspaceId)
+      .all<AclSnapshotRow>();
+    const revision = snapshot.results[0];
     return {
       pageId,
       revision: revision?.revision ?? 0,
       updatedAt: revision?.updated_at ?? null,
-      entries: acl.results.map((entry) => ({
+      entries: snapshot.results.flatMap((entry) => entry.user_id === null ||
+        entry.display_name === null || entry.email === null || entry.permission === null
+        ? []
+        : [{
         userId: entry.user_id,
         displayName: entry.display_name,
         email: entry.email,
         permission: entry.permission,
-      })),
+      }]),
     };
   }
 
@@ -428,12 +423,36 @@ export class AdminService {
       : request.displayName;
     const enabled = request.enabled ?? current.enabled === 1;
     const now = monotonicTimestamp(current.updated_at);
-    await this.database.batch([
+    const results = await this.database.batch([
+      this.database
+        .prepare(
+          `INSERT INTO audit_events
+             (id, actor_id, action, target_type, target_id, metadata_json, created_at)
+           SELECT ?1, ?2, 'bot_channel.updated', 'bot_channel', ?3, ?4, ?5
+             FROM bot_channel_allowlist
+            WHERE workspace_id = ?6 AND provider = ?7 AND external_channel_id = ?8
+              AND updated_at = ?9`,
+        )
+        .bind(
+          createUuidV7(),
+          identity.id,
+          channelTarget(provider, externalChannelId),
+          JSON.stringify({
+            before: { displayName: current.display_name, enabled: current.enabled === 1 },
+            after: { displayName, enabled },
+          }),
+          now,
+          identity.workspaceId,
+          provider,
+          externalChannelId,
+          current.updated_at,
+        ),
       this.database
         .prepare(
           `UPDATE bot_channel_allowlist
               SET display_name = ?1, enabled = ?2, updated_at = ?3
-            WHERE workspace_id = ?4 AND provider = ?5 AND external_channel_id = ?6`,
+            WHERE workspace_id = ?4 AND provider = ?5 AND external_channel_id = ?6
+              AND updated_at = ?7`,
         )
         .bind(
           displayName,
@@ -442,19 +461,10 @@ export class AdminService {
           identity.workspaceId,
           provider,
           externalChannelId,
+          current.updated_at,
         ),
-      auditEventStatement(this.database, {
-        actorId: identity.id,
-        action: "bot_channel.updated",
-        targetType: "bot_channel",
-        targetId: channelTarget(provider, externalChannelId),
-        metadata: {
-          before: { displayName: current.display_name, enabled: current.enabled === 1 },
-          after: { displayName, enabled },
-        },
-        createdAt: now,
-      }),
     ]);
+    if (results[1]?.meta.changes !== 1) throw botChannelConflict();
     const updated = await this.findBotChannel(identity.workspaceId, provider, externalChannelId);
     if (updated === null) throw botChannelNotFound();
     return mapBotChannel(updated);
@@ -469,26 +479,40 @@ export class AdminService {
     const current = await this.findBotChannel(identity.workspaceId, provider, externalChannelId);
     if (current === null) throw botChannelNotFound();
     const now = new Date().toISOString();
-    await this.database.batch([
+    const results = await this.database.batch([
+      this.database
+        .prepare(
+          `INSERT INTO audit_events
+             (id, actor_id, action, target_type, target_id, metadata_json, created_at)
+           SELECT ?1, ?2, 'bot_channel.deleted', 'bot_channel', ?3, ?4, ?5
+             FROM bot_channel_allowlist
+            WHERE workspace_id = ?6 AND provider = ?7 AND external_channel_id = ?8
+              AND updated_at = ?9`,
+        )
+        .bind(
+          createUuidV7(),
+          identity.id,
+          channelTarget(provider, externalChannelId),
+          JSON.stringify({
+            provider,
+            displayName: current.display_name,
+            enabled: current.enabled === 1,
+          }),
+          now,
+          identity.workspaceId,
+          provider,
+          externalChannelId,
+          current.updated_at,
+        ),
       this.database
         .prepare(
           `DELETE FROM bot_channel_allowlist
-            WHERE workspace_id = ?1 AND provider = ?2 AND external_channel_id = ?3`,
+            WHERE workspace_id = ?1 AND provider = ?2 AND external_channel_id = ?3
+              AND updated_at = ?4`,
         )
-        .bind(identity.workspaceId, provider, externalChannelId),
-      auditEventStatement(this.database, {
-        actorId: identity.id,
-        action: "bot_channel.deleted",
-        targetType: "bot_channel",
-        targetId: channelTarget(provider, externalChannelId),
-        metadata: {
-          provider,
-          displayName: current.display_name,
-          enabled: current.enabled === 1,
-        },
-        createdAt: now,
-      }),
+        .bind(identity.workspaceId, provider, externalChannelId, current.updated_at),
     ]);
+    if (results[1]?.meta.changes !== 1) throw botChannelNotFound();
   }
 
   private async findMember(workspaceId: string, memberId: string): Promise<MemberRow | null> {
@@ -540,13 +564,13 @@ export class AdminService {
     request: ReplacePageAclRequest,
   ): Promise<void> {
     if (request.entries.length === 0) return;
-    const placeholders = request.entries.map((_entry, index) => `?${String(index + 2)}`).join(", ");
     const result = await this.database
       .prepare(
         `SELECT id, role, status FROM users
-          WHERE workspace_id = ?1 AND id IN (${placeholders})`,
+          WHERE workspace_id = ?1
+            AND id IN (SELECT value FROM json_each(?2))`,
       )
-      .bind(workspaceId, ...request.entries.map((entry) => entry.userId))
+      .bind(workspaceId, JSON.stringify(request.entries.map((entry) => entry.userId)))
       .all<AclMemberRow>();
     const members = new Map(result.results.map((member) => [member.id, member]));
     const invalid = request.entries.some((entry) => {
@@ -592,15 +616,16 @@ export class AdminService {
     if (ancestors.results.length === 0) return;
 
     const ancestorIds = ancestors.results.map((ancestor) => ancestor.id);
-    const ancestorPlaceholders = ancestorIds.map((_id, index) => `?${String(index + 1)}`).join(", ");
-    const userPlaceholders = entries.map((_entry, index) => `?${String(index + ancestorIds.length + 1)}`).join(", ");
     const grants = await this.database
       .prepare(
         `SELECT page_id, user_id FROM page_acl
-          WHERE page_id IN (${ancestorPlaceholders})
-            AND user_id IN (${userPlaceholders})`,
+          WHERE page_id IN (SELECT value FROM json_each(?1))
+            AND user_id IN (SELECT value FROM json_each(?2))`,
       )
-      .bind(...ancestorIds, ...entries.map((entry) => entry.userId))
+      .bind(
+        JSON.stringify(ancestorIds),
+        JSON.stringify(entries.map((entry) => entry.userId)),
+      )
       .all<{ page_id: string; user_id: string }>();
     const grantsByUser = new Map<string, Set<string>>();
     for (const grant of grants.results) {
@@ -675,6 +700,14 @@ function memberNotFound(): ApiProblem {
 
 function botChannelNotFound(): ApiProblem {
   return new ApiProblem("BOT_CHANNEL_NOT_FOUND", 404, "The bot channel was not found");
+}
+
+function botChannelConflict(): ApiProblem {
+  return new ApiProblem(
+    "BOT_CHANNEL_UPDATE_CONFLICT",
+    409,
+    "The bot channel changed after it was loaded",
+  );
 }
 
 function channelTarget(provider: BotProvider, externalChannelId: string): string {

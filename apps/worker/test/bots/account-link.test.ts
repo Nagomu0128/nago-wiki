@@ -91,4 +91,27 @@ describe("bot account links", () => {
       ),
     ).resolves.toBe(false);
   });
+
+  it("audits exactly one successful concurrent unlink", async () => {
+    const issued = await issueAccountLinkCode(env.DB, userId, "discord");
+    await expect(
+      consumeAccountLinkCode(
+        env.DB,
+        "discord",
+        "discord-user-concurrent-unlink",
+        issued.code,
+        DEFAULT_WORKSPACE_ID,
+      ),
+    ).resolves.toBe(true);
+
+    const outcomes = await Promise.all([
+      unlinkBotAccount(env.DB, userId, "discord"),
+      unlinkBotAccount(env.DB, userId, "discord"),
+    ]);
+    expect(outcomes.filter(Boolean)).toHaveLength(1);
+    const audit = await env.DB.prepare(
+      `SELECT count(*) AS count FROM audit_events WHERE action = 'bot_identity.unlinked'`,
+    ).first<{ count: number }>();
+    expect(audit?.count).toBe(1);
+  });
 });

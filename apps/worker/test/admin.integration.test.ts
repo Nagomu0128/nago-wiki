@@ -176,6 +176,53 @@ describe("owner administration", () => {
     ).resolves.toMatchObject({ pageId: childPageId, revision: 1 });
   });
 
+  it("accepts the schema maximum ACL entries without exceeding D1 bind limits", async () => {
+    await insertRestrictedPage();
+    const entries: { userId: string; permission: "viewer" }[] = [];
+    for (let index = 0; index < 200; index += 1) {
+      const id = `00000000-0000-7000-8000-${String(index + 100).padStart(12, "0")}`;
+      await insertUser(id, DEFAULT_WORKSPACE_ID, "viewer", `acl-${index}@example.com`);
+      entries.push({ userId: id, permission: "viewer" });
+    }
+
+    const acl = await new AdminService(env.DB).replacePageAcl(owner, pageId, {
+      baseRevision: 0,
+      entries,
+    });
+    expect(acl.revision).toBe(1);
+    expect(acl.entries).toHaveLength(200);
+    expect(new Set(acl.entries.map((entry) => entry.userId))).toEqual(
+      new Set(entries.map((entry) => entry.userId)),
+    );
+  });
+
+  it("keeps the ACL revision and entries from one concurrent snapshot", async () => {
+    await insertRestrictedPage();
+    const service = new AdminService(env.DB);
+    const outcomes = await Promise.allSettled([
+      service.replacePageAcl(owner, pageId, {
+        baseRevision: 0,
+        entries: [{ userId: editor.id, permission: "editor" }],
+      }),
+      service.replacePageAcl(owner, pageId, {
+        baseRevision: 0,
+        entries: [{ userId: viewer.id, permission: "viewer" }],
+      }),
+    ]);
+    expect(outcomes.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(1);
+
+    const snapshot = await service.getPageAcl(owner, pageId);
+    expect(snapshot.revision).toBe(1);
+    expect(snapshot.entries).toHaveLength(1);
+    expect([
+      { userId: editor.id, permission: "editor" },
+      { userId: viewer.id, permission: "viewer" },
+    ]).toContainEqual({
+      userId: snapshot.entries[0]?.userId,
+      permission: snapshot.entries[0]?.permission,
+    });
+  });
+
   it("bounds and validates route-level admin JSON bodies", async () => {
     const ownerApp = testApp(owner);
     const malformed = await ownerApp.request(
@@ -298,6 +345,40 @@ describe("owner administration", () => {
     expect(audit.results.map((event) => event.action)).toEqual(
       expect.arrayContaining(["bot_channel.created", "bot_provider.updated"]),
     );
+  });
+
+  it("commits one bot channel mutation and audit under concurrent writes", async () => {
+    const service = new AdminService(env.DB);
+    await service.createBotChannel(owner, {
+      provider: "discord",
+      externalChannelId: "concurrent-channel",
+      displayName: "Original",
+      enabled: true,
+    });
+
+    const updates = await Promise.allSettled([
+      service.updateBotChannel(owner, "discord", "concurrent-channel", {
+        displayName: "Renamed",
+      }),
+      service.updateBotChannel(owner, "discord", "concurrent-channel", { enabled: false }),
+    ]);
+    expect(updates.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(1);
+    expect(updates.filter((outcome) => outcome.status === "rejected")).toHaveLength(1);
+    const updatedAudit = await env.DB.prepare(
+      `SELECT count(*) AS count FROM audit_events WHERE action = 'bot_channel.updated'`,
+    ).first<{ count: number }>();
+    expect(updatedAudit?.count).toBe(1);
+
+    const deletes = await Promise.allSettled([
+      service.deleteBotChannel(owner, "discord", "concurrent-channel"),
+      service.deleteBotChannel(owner, "discord", "concurrent-channel"),
+    ]);
+    expect(deletes.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(1);
+    expect(deletes.filter((outcome) => outcome.status === "rejected")).toHaveLength(1);
+    const deletedAudit = await env.DB.prepare(
+      `SELECT count(*) AS count FROM audit_events WHERE action = 'bot_channel.deleted'`,
+    ).first<{ count: number }>();
+    expect(deletedAudit?.count).toBe(1);
   });
 });
 

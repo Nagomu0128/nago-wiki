@@ -166,21 +166,34 @@ export async function unlinkBotAccount(
     .first<LinkedIdentityRow>();
   if (existing === null) return false;
   const now = new Date().toISOString();
-  await database.batch([
-    database
-      .prepare(
-        `DELETE FROM external_identities WHERE user_id = ?1 AND provider = ?2`,
-      )
-      .bind(userId, provider),
+  const results = await database.batch([
     database
       .prepare(
         `INSERT INTO audit_events
            (id, actor_id, action, target_type, target_id, metadata_json, created_at)
-         VALUES (?1, ?2, 'bot_identity.unlinked', 'user', ?2, ?3, ?4)`,
+         SELECT ?1, ?2, 'bot_identity.unlinked', 'user', ?2, ?3, ?4
+           FROM external_identities
+          WHERE user_id = ?2 AND provider = ?5
+            AND external_subject = ?6 AND linked_at = ?7`,
       )
-      .bind(createUuidV7(), userId, JSON.stringify({ provider }), now),
+      .bind(
+        createUuidV7(),
+        userId,
+        JSON.stringify({ provider }),
+        now,
+        provider,
+        existing.external_subject,
+        existing.linked_at,
+      ),
+    database
+      .prepare(
+        `DELETE FROM external_identities
+          WHERE user_id = ?1 AND provider = ?2
+            AND external_subject = ?3 AND linked_at = ?4`,
+      )
+      .bind(userId, provider, existing.external_subject, existing.linked_at),
   ]);
-  return true;
+  return results[1]?.meta.changes === 1;
 }
 
 export async function resolveExternalUser(
