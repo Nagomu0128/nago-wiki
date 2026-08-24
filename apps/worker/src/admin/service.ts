@@ -15,6 +15,7 @@ import { AuthorizationService } from "../core/authorization";
 import { ApiProblem, isD1UniqueConstraintError } from "../core/errors";
 import { D1WikiRepository, pageNotFound } from "../core/repository";
 import { createAuditEventStatement as auditEventStatement } from "../core/audit-events";
+import { createUuidV7 } from "../core/ids";
 
 interface MemberRow extends Record<string, unknown> {
   id: string;
@@ -141,7 +142,7 @@ export class AdminService {
             WHERE id = ?3 AND workspace_id = ?6 AND updated_at = ?5`,
         )
         .bind(
-          crypto.randomUUID(),
+          createUuidV7(),
           identity.id,
           memberId,
           JSON.stringify(metadata),
@@ -267,7 +268,7 @@ export class AdminService {
             WHERE page_id = ?3 AND last_mutation_id = ?6`,
         )
         .bind(
-          crypto.randomUUID(),
+          createUuidV7(),
           identity.id,
           pageId,
           JSON.stringify({

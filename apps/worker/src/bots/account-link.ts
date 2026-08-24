@@ -178,7 +178,7 @@ export async function unlinkBotAccount(
            (id, actor_id, action, target_type, target_id, metadata_json, created_at)
          VALUES (?1, ?2, 'bot_identity.unlinked', 'user', ?2, ?3, ?4)`,
       )
-      .bind(crypto.randomUUID(), userId, JSON.stringify({ provider }), now),
+      .bind(createUuidV7(), userId, JSON.stringify({ provider }), now),
   ]);
   return true;
 }
