@@ -1,0 +1,213 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "nago-wiki-api",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-18",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+  "assets": {
+    "directory": "../web/dist",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": [
+      "/api/*",
+      "/mcp",
+      "/authorize",
+      "/oauth/*",
+      "/.well-known/*"
+    ]
+  },
+  "vars": {
+    "ENVIRONMENT": "development",
+    "AI_GATEWAY_ID": "nago-wiki-dev",
+    "ANSWER_MODEL": "@cf/zai-org/glm-4.7-flash",
+    "DEFAULT_KNOWLEDGE_MODE": "wiki_plus_general",
+    "ACCESS_AUDIENCE": "configure-in-environment",
+    "ACCESS_ISSUER": "https://configure.cloudflareaccess.com",
+    "ALLOW_DEVELOPMENT_IDENTITY": "true",
+    "WORKSPACE_ID": "00000000-0000-7000-8000-000000000001",
+    "BOOTSTRAP_OWNER_EMAIL": "owner@example.com",
+    "GOOGLE_CLIENT_ID": "configure-in-environment",
+    "GOOGLE_PICKER_API_KEY": "configure-in-environment",
+    "GOOGLE_CLOUD_PROJECT_NUMBER": "configure-in-environment",
+    "MCP_PUBLIC_ORIGIN": "http://localhost:8787",
+    "WORKER_INTERNAL_URL": "http://localhost:8787"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "PAGE_ROOM",
+        "class_name": "PageRoom"
+      },
+      {
+        "name": "DISCORD_GATEWAY",
+        "class_name": "DiscordGatewayContainer"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["PageRoom", "DiscordGatewayContainer"]
+    }
+  ],
+  "containers": [
+    {
+      "name": "nago-wiki-discord-dev",
+      "class_name": "DiscordGatewayContainer",
+      "image": "../discord-bot/Dockerfile",
+      "image_build_context": "../..",
+      "instance_type": "lite",
+      "max_instances": 1
+    }
+  ],
+  "env": {
+    "production": {
+      "name": "nago-wiki-prod",
+      "vars": {
+        "ENVIRONMENT": "production",
+        "AI_GATEWAY_ID": "nago-wiki-prod",
+        "ANSWER_MODEL": "@cf/zai-org/glm-4.7-flash",
+        "DEFAULT_KNOWLEDGE_MODE": "wiki_plus_general",
+        "ACCESS_AUDIENCE": "configure-before-deploy",
+        "ACCESS_ISSUER": "https://configure.cloudflareaccess.com",
+        "ALLOW_DEVELOPMENT_IDENTITY": "false",
+        "WORKSPACE_ID": "00000000-0000-7000-8000-000000000001",
+        "BOOTSTRAP_OWNER_EMAIL": "owner@configure-before-deploy.invalid",
+        "GOOGLE_CLIENT_ID": "configure-before-deploy",
+        "GOOGLE_PICKER_API_KEY": "configure-before-deploy",
+        "GOOGLE_CLOUD_PROJECT_NUMBER": "configure-before-deploy",
+        "MCP_PUBLIC_ORIGIN": "https://configure-before-deploy.example",
+        "WORKER_INTERNAL_URL": "https://configure-before-deploy.example"
+      },
+      "kv_namespaces": [
+        {
+          "binding": "OAUTH_KV",
+          "id": "00000000000000000000000000000000"
+        }
+      ],
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "nago-wiki-prod",
+          "database_id": "00000000-0000-0000-0000-000000000000",
+          "migrations_dir": "../../migrations"
+        }
+      ],
+      "r2_buckets": [
+        {
+          "binding": "FILES",
+          "bucket_name": "nago-wiki-prod-files"
+        }
+      ],
+      "ai": { "binding": "AI" },
+      "ai_search": [
+        {
+          "binding": "WIKI_SEARCH",
+          "instance_name": "nago-wiki-prod"
+        }
+      ],
+      "queues": {
+        "producers": [
+          {
+            "binding": "ASYNC_JOBS",
+            "queue": "nago-wiki-prod-jobs"
+          }
+        ],
+        "consumers": [
+          {
+            "queue": "nago-wiki-prod-jobs",
+            "max_batch_size": 10,
+            "max_batch_timeout": 5,
+            "max_retries": 5,
+            "dead_letter_queue": "nago-wiki-prod-jobs-dlq"
+          }
+        ]
+      },
+      "workflows": [
+        {
+          "name": "nago-wiki-import-prod",
+          "binding": "IMPORT_WORKFLOW",
+          "class_name": "ImportWorkflow"
+        }
+      ],
+      "durable_objects": {
+        "bindings": [
+          { "name": "PAGE_ROOM", "class_name": "PageRoom" },
+          {
+            "name": "DISCORD_GATEWAY",
+            "class_name": "DiscordGatewayContainer"
+          }
+        ]
+      },
+      "containers": [
+        {
+          "name": "nago-wiki-discord-prod",
+          "class_name": "DiscordGatewayContainer",
+          "image": "../discord-bot/Dockerfile",
+          "image_build_context": "../..",
+          "instance_type": "lite",
+          "max_instances": 1
+        }
+      ]
+    }
+  },
+  "kv_namespaces": [
+    {
+      "binding": "OAUTH_KV",
+      "id": "00000000000000000000000000000000"
+    }
+  ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "nago-wiki-dev",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "../../migrations"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "FILES",
+      "bucket_name": "nago-wiki-files-dev"
+    }
+  ],
+  "ai": {
+    "binding": "AI"
+  },
+  "ai_search": [
+    {
+      "binding": "WIKI_SEARCH",
+      "instance_name": "nago-wiki-dev"
+    }
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "ASYNC_JOBS",
+        "queue": "nago-wiki-jobs-dev"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "nago-wiki-jobs-dev",
+        "max_batch_size": 10,
+        "max_batch_timeout": 5,
+        "max_retries": 3,
+        "dead_letter_queue": "nago-wiki-jobs-dlq-dev"
+      }
+    ]
+  },
+  "workflows": [
+    {
+      "name": "nago-wiki-import-dev",
+      "binding": "IMPORT_WORKFLOW",
+      "class_name": "ImportWorkflow"
+    }
+  ],
+  "triggers": {
+    "crons": ["*/1 * * * *"]
+  }
+}

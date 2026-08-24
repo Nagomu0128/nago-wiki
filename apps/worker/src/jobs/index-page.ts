@@ -1,0 +1,108 @@
+import type { IndexPageJob } from "./contracts";
+import { refreshPageLinks } from "./wiki-links";
+
+interface IndexablePageRow {
+  id: string;
+  workspace_id: string;
+  title: string;
+  body_md: string;
+  revision: number;
+  content_hash: string;
+  status: string;
+}
+
+export interface PageIndexDependencies {
+  database: D1Database;
+  search: AiSearchInstance;
+}
+
+export async function indexPage(
+  dependencies: PageIndexDependencies,
+  job: IndexPageJob,
+): Promise<"indexed" | "superseded" | "deleted"> {
+  const page = await dependencies.database
+    .prepare(
+      `SELECT id, workspace_id, title, body_md, revision, content_hash, status
+         FROM pages
+        WHERE id = ?1 AND workspace_id = ?2`,
+    )
+    .bind(job.pageId, job.workspaceId)
+    .first<IndexablePageRow>();
+
+  if (page?.status !== "active") {
+    await dependencies.search.items.delete(
+      `w/${job.workspaceId}/p/${job.pageId}.md`,
+    );
+    await markDeleted(dependencies.database, job.pageId);
+    return "deleted";
+  }
+  if (page.content_hash !== job.desiredHash) {
+    return "superseded";
+  }
+
+  const key = `w/${job.workspaceId}/p/${job.pageId}.md`;
+  try {
+    await refreshPageLinks(dependencies.database, {
+      workspaceId: page.workspace_id,
+      pageId: page.id,
+      revision: page.revision,
+      markdown: page.body_md,
+    });
+    await dependencies.search.items.upload(key, renderIndexDocument(page), {
+      metadata: {
+        workspace_id: job.workspaceId,
+        page_id: job.pageId,
+        content_hash: page.content_hash,
+        language: "ja",
+        kind: "page",
+      },
+    });
+    await dependencies.database
+      .prepare(
+        `UPDATE index_state
+            SET indexed_hash = ?2,
+                status = 'indexed',
+                last_error = NULL,
+                updated_at = ?3
+          WHERE page_id = ?1 AND desired_hash = ?2`,
+      )
+      .bind(page.id, page.content_hash, new Date().toISOString())
+      .run();
+    return "indexed";
+  } catch (error) {
+    await dependencies.database
+      .prepare(
+        `UPDATE index_state
+            SET status = 'failed', last_error = ?2, updated_at = ?3
+          WHERE page_id = ?1`,
+      )
+      .bind(page.id, errorMessage(error), new Date().toISOString())
+      .run();
+    throw error;
+  }
+}
+
+function renderIndexDocument(page: IndexablePageRow): string {
+  return `# ${page.title}\n\n${page.body_md}`;
+}
+
+async function markDeleted(database: D1Database, pageId: string): Promise<void> {
+  await database
+    .prepare(
+      `UPDATE index_state
+          SET indexed_hash = NULL, status = 'deleted', last_error = NULL,
+              updated_at = ?2
+        WHERE page_id = ?1
+          AND EXISTS (
+            SELECT 1 FROM pages
+             WHERE pages.id = index_state.page_id
+               AND pages.status = 'trashed'
+          )`,
+    )
+    .bind(pageId, new Date().toISOString())
+    .run();
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message.slice(0, 1_000) : "Unknown indexing error";
+}

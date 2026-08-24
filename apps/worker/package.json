@@ -1,0 +1,27 @@
+{
+  "name": "@nago-wiki/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "wrangler deploy --dry-run --containers-rollout none --outdir dist",
+    "dev": "wrangler dev --local",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "types": "wrangler types worker-configuration.d.ts"
+  },
+  "dependencies": {
+    "@cloudflare/containers": "^0.3.7",
+    "@cloudflare/workers-oauth-provider": "^0.10.3",
+    "@hono/zod-validator": "^0.9.0",
+    "@modelcontextprotocol/server": "^2.0.0",
+    "@nago-wiki/shared": "0.1.0",
+    "agents": "^0.20.1",
+    "diff": "^9.0.0",
+    "hono": "^4.0.0",
+    "lib0": "^0.2.117",
+    "y-protocols": "^1.0.7",
+    "yjs": "^13.6.32",
+    "zod": "^4.0.0"
+  }
+}

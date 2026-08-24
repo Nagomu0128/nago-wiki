@@ -1,0 +1,12 @@
+cloudflare_account_id = "replace-with-your-account-id"
+environment           = "dev"
+d1_primary_location   = "apac"
+ai_monthly_budget_usd      = 2
+ai_user_monthly_budget_usd = 1.5
+
+# Uncomment after configuring a Google identity provider in Cloudflare Access.
+# cloudflare_zone_id                 = "00000000000000000000000000000000"
+# access_domain                     = "wiki.example.com"
+# access_allowed_emails             = ["owner@example.com"]
+# bootstrap_owner_email              = "owner@example.com"
+# access_google_identity_provider_id = "00000000-0000-0000-0000-000000000000"

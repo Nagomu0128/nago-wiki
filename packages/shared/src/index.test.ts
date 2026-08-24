@@ -1,0 +1,43 @@
+import { describe, expect, it } from "vitest";
+import {
+  createPageRequestSchema,
+  healthResponseSchema,
+  normalizeWikiPath,
+  updatePageRequestSchema,
+  workspaceRoleSchema,
+} from "./index";
+
+describe("shared contracts", () => {
+  it("accepts supported workspace roles", () => {
+    expect(workspaceRoleSchema.parse("editor")).toBe("editor");
+  });
+
+  it("rejects a health response without an ISO timestamp", () => {
+    expect(() =>
+      healthResponseSchema.parse({
+        ok: true,
+        service: "nago-wiki",
+        timestamp: "today",
+      }),
+    ).toThrow();
+  });
+
+  it("applies safe defaults to page creation", () => {
+    expect(createPageRequestSchema.parse({ title: "Home" })).toMatchObject({
+      accessMode: "workspace",
+      bodyMd: "",
+      parentId: null,
+    });
+  });
+
+  it("requires optimistic concurrency for page updates", () => {
+    expect(() => updatePageRequestSchema.parse({ bodyMd: "changed" })).toThrow();
+    expect(
+      updatePageRequestSchema.parse({ baseRevision: 3, bodyMd: "changed" }),
+    ).toMatchObject({ baseRevision: 3 });
+  });
+
+  it("normalizes Wiki paths consistently for aliases and lookups", () => {
+    expect(normalizeWikiPath(" /Ｇuides/Old Page/ ")).toBe("guides/old page");
+  });
+});
