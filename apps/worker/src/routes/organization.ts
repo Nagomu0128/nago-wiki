@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 
 import { requireIdentity, type CoreHonoEnv } from "../core/context";
+import { readBoundedText } from "../core/bounded-body";
 import { ApiProblem } from "../core/errors";
 import { TagsService } from "../core/tags-service";
 import { decodeCursor, encodeCursor } from "../mcp/pagination";
@@ -11,6 +12,7 @@ import type { McpRuntimeEnv } from "../mcp/types";
 const replaceTagsSchema = z.object({
   names: z.array(z.string().trim().min(1).max(100)).max(50),
 });
+const MAX_TAG_BODY_BYTES = 16 * 1_024;
 
 export function createOrganizationRoutes(): Hono<CoreHonoEnv> {
   const routes = new Hono<CoreHonoEnv>();
@@ -23,7 +25,16 @@ export function createOrganizationRoutes(): Hono<CoreHonoEnv> {
   });
 
   routes.put("/pages/:id/tags", async (context) => {
-    const parsed = replaceTagsSchema.safeParse(await context.req.json());
+    let body: unknown;
+    try {
+      body = JSON.parse(
+        await readBoundedText(context.req.raw, MAX_TAG_BODY_BYTES),
+      ) as unknown;
+    } catch (error) {
+      if (error instanceof ApiProblem) throw error;
+      throw new ApiProblem("INVALID_REQUEST", 400, "Invalid JSON request body");
+    }
+    const parsed = replaceTagsSchema.safeParse(body);
     if (!parsed.success) {
       throw new ApiProblem("INVALID_REQUEST", 400, "Invalid tag selection");
     }

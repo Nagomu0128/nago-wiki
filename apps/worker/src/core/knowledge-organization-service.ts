@@ -12,7 +12,6 @@ import { ApiProblem } from "./errors";
 import { D1WikiRepository } from "./repository";
 
 const COLLECTION_LIMIT = 50;
-const CANDIDATE_LIMIT = 200;
 const TRASH_RETENTION_MILLISECONDS = 30 * 24 * 60 * 60 * 1_000;
 
 interface NavigationRow extends Record<string, unknown> {
@@ -106,19 +105,42 @@ export class KnowledgeOrganizationService {
     this.requireActiveIdentity(identity);
     const result = await this.database
       .prepare(
-        `SELECT p.id, p.parent_id, p.slug, p.title, p.access_mode, p.updated_at,
+        `WITH RECURSIVE lineage(page_id, ancestor_id, parent_id, access_mode) AS (
+           SELECT id, id, parent_id, access_mode FROM pages
+            WHERE workspace_id = ?2
+           UNION ALL
+           SELECT lineage.page_id, parent.id, parent.parent_id, parent.access_mode
+             FROM lineage JOIN pages AS parent ON parent.id = lineage.parent_id
+            WHERE parent.workspace_id = ?2
+         )
+         SELECT p.id, p.parent_id, p.slug, p.title, p.access_mode, p.updated_at,
                 state.last_viewed_at
            FROM user_page_state AS state
            JOIN pages AS p ON p.id = state.page_id
+           JOIN users AS member ON member.id = ?1
+                               AND member.workspace_id = p.workspace_id
+                               AND member.status = 'active'
           WHERE state.user_id = ?1 AND state.last_viewed_at IS NOT NULL
             AND p.workspace_id = ?2 AND p.status = 'active'
+            AND (
+              member.role = 'owner' OR NOT EXISTS (
+                SELECT 1 FROM lineage AS restricted
+                 WHERE restricted.page_id = p.id
+                   AND restricted.access_mode = 'restricted'
+                   AND NOT EXISTS (
+                     SELECT 1 FROM page_acl AS acl
+                      WHERE acl.page_id = restricted.ancestor_id
+                        AND acl.user_id = member.id
+                        AND acl.permission IN ('viewer', 'editor')
+                   )
+              )
+            )
           ORDER BY state.last_viewed_at DESC, p.id
           LIMIT ?3`,
       )
-      .bind(identity.id, identity.workspaceId, CANDIDATE_LIMIT)
+      .bind(identity.id, identity.workspaceId, COLLECTION_LIMIT)
       .all<RecentRow>();
-    const visible = await this.filterVisible(identity, result.results);
-    return visible.slice(0, COLLECTION_LIMIT).map((row) => ({
+    return result.results.map((row) => ({
       ...mapNavigation(row),
       lastViewedAt: row.last_viewed_at,
     }));
@@ -130,19 +152,42 @@ export class KnowledgeOrganizationService {
     this.requireActiveIdentity(identity);
     const result = await this.database
       .prepare(
-        `SELECT p.id, p.parent_id, p.slug, p.title, p.access_mode, p.updated_at,
+        `WITH RECURSIVE lineage(page_id, ancestor_id, parent_id, access_mode) AS (
+           SELECT id, id, parent_id, access_mode FROM pages
+            WHERE workspace_id = ?2
+           UNION ALL
+           SELECT lineage.page_id, parent.id, parent.parent_id, parent.access_mode
+             FROM lineage JOIN pages AS parent ON parent.id = lineage.parent_id
+            WHERE parent.workspace_id = ?2
+         )
+         SELECT p.id, p.parent_id, p.slug, p.title, p.access_mode, p.updated_at,
                 state.favorited_at
            FROM user_page_state AS state
            JOIN pages AS p ON p.id = state.page_id
+           JOIN users AS member ON member.id = ?1
+                               AND member.workspace_id = p.workspace_id
+                               AND member.status = 'active'
           WHERE state.user_id = ?1 AND state.favorited_at IS NOT NULL
             AND p.workspace_id = ?2 AND p.status = 'active'
+            AND (
+              member.role = 'owner' OR NOT EXISTS (
+                SELECT 1 FROM lineage AS restricted
+                 WHERE restricted.page_id = p.id
+                   AND restricted.access_mode = 'restricted'
+                   AND NOT EXISTS (
+                     SELECT 1 FROM page_acl AS acl
+                      WHERE acl.page_id = restricted.ancestor_id
+                        AND acl.user_id = member.id
+                        AND acl.permission IN ('viewer', 'editor')
+                   )
+              )
+            )
           ORDER BY state.favorited_at DESC, p.id
           LIMIT ?3`,
       )
-      .bind(identity.id, identity.workspaceId, CANDIDATE_LIMIT)
+      .bind(identity.id, identity.workspaceId, COLLECTION_LIMIT)
       .all<FavoriteRow>();
-    const visible = await this.filterVisible(identity, result.results);
-    return visible.slice(0, COLLECTION_LIMIT).map((row) => ({
+    return result.results.map((row) => ({
       ...mapNavigation(row),
       favoritedAt: row.favorited_at,
     }));
@@ -154,28 +199,52 @@ export class KnowledgeOrganizationService {
     this.requireActiveIdentity(identity);
     const result = await this.database
       .prepare(
-        `SELECT p.id, p.parent_id, p.slug, p.title, p.access_mode, p.updated_at,
+        `WITH RECURSIVE lineage(page_id, ancestor_id, parent_id, access_mode) AS (
+           SELECT id, id, parent_id, access_mode FROM pages
+            WHERE workspace_id = ?1
+           UNION ALL
+           SELECT lineage.page_id, parent.id, parent.parent_id, parent.access_mode
+             FROM lineage JOIN pages AS parent ON parent.id = lineage.parent_id
+            WHERE parent.workspace_id = ?1
+         )
+         SELECT p.id, p.parent_id, p.slug, p.title, p.access_mode, p.updated_at,
                 p.trashed_at, parent.status AS parent_status
            FROM pages AS p
            LEFT JOIN pages AS parent ON parent.id = p.parent_id
+           JOIN users AS member ON member.id = ?2
+                               AND member.workspace_id = p.workspace_id
+                               AND member.status = 'active'
           WHERE p.workspace_id = ?1 AND p.status = 'trashed'
             AND p.trashed_at IS NOT NULL
-            AND p.trashed_at >= ?2
+            AND p.trashed_at >= ?3
             AND (
               parent.id IS NULL OR parent.status = 'active'
               OR parent.trash_batch_id IS NOT p.trash_batch_id
             )
+            AND (
+              member.role = 'owner' OR NOT EXISTS (
+                SELECT 1 FROM lineage AS restricted
+                 WHERE restricted.page_id = p.id
+                   AND restricted.access_mode = 'restricted'
+                   AND NOT EXISTS (
+                     SELECT 1 FROM page_acl AS acl
+                      WHERE acl.page_id = restricted.ancestor_id
+                        AND acl.user_id = member.id
+                        AND acl.permission IN ('viewer', 'editor')
+                   )
+              )
+            )
           ORDER BY p.trashed_at DESC, p.id
-          LIMIT ?3`,
+          LIMIT ?4`,
       )
       .bind(
         identity.workspaceId,
+        identity.id,
         new Date(Date.now() - TRASH_RETENTION_MILLISECONDS).toISOString(),
-        CANDIDATE_LIMIT,
+        COLLECTION_LIMIT,
       )
       .all<TrashRow>();
-    const visible = await this.filterVisible(identity, result.results);
-    return visible.slice(0, COLLECTION_LIMIT).map((row) => ({
+    return result.results.map((row) => ({
       ...mapNavigation(row),
       trashedAt: row.trashed_at,
       restorable: row.parent_id === null || row.parent_status === "active",
@@ -208,15 +277,6 @@ export class KnowledgeOrganizationService {
     }
   }
 
-  private async filterVisible<Row extends NavigationRow>(
-    identity: AuthenticatedIdentity,
-    rows: Row[],
-  ): Promise<Row[]> {
-    const permissions = await Promise.all(
-      rows.map((row) => this.#authorization.effectivePermission(identity, row.id)),
-    );
-    return rows.filter((_row, index) => canView(permissions[index] ?? "none"));
-  }
 }
 
 function mapNavigation(row: NavigationRow): PageNavigationItem {

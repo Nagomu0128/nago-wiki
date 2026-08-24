@@ -1,10 +1,16 @@
 import type { AuthenticatedIdentity } from "@nago-wiki/shared";
 import { env } from "cloudflare:workers";
+import { Hono } from "hono";
 import { beforeEach, describe, expect, it } from "vitest";
 
+import {
+  coreErrorHandler,
+  type CoreHonoEnv,
+} from "../src/core/context";
 import { KnowledgeOrganizationService } from "../src/core/knowledge-organization-service";
 import { createUuidV7 } from "../src/core/ids";
 import { DEFAULT_WORKSPACE_ID } from "../src/core/repository";
+import { createOrganizationRoutes } from "../src/routes/organization";
 
 describe("knowledge organization", () => {
   let editor: AuthenticatedIdentity;
@@ -132,6 +138,104 @@ describe("knowledge organization", () => {
       .bind(pageId)
       .run();
     await expect(service.listFavorites(viewer)).resolves.toHaveLength(1);
+  });
+
+  it("applies authorization before limiting recent, favorite, and trash results", async () => {
+    const visiblePageId = await insertPage(editor.id, {
+      title: "Visible after hidden candidates",
+      slug: "visible-after-hidden-candidates",
+    });
+    const hiddenTimestamp = new Date().toISOString();
+    const visibleTimestamp = new Date(Date.now() - 60_000).toISOString();
+    await env.DB.prepare(
+      `WITH RECURSIVE sequence(value) AS (
+         SELECT 1
+         UNION ALL SELECT value + 1 FROM sequence WHERE value < 201
+       )
+       INSERT INTO pages
+         (id, workspace_id, parent_id, slug, title, body_md, revision,
+          content_hash, access_mode, status, created_by, created_at, updated_at,
+          trashed_at, trash_batch_id)
+       SELECT printf('hidden-padding-%03d', value), ?, NULL,
+              printf('hidden-padding-%03d', value), 'Hidden padding', '', 1, ?,
+              'restricted', 'active', ?, ?, ?, NULL, NULL
+         FROM sequence`,
+    )
+      .bind(
+        DEFAULT_WORKSPACE_ID,
+        "0".repeat(64),
+        editor.id,
+        hiddenTimestamp,
+        hiddenTimestamp,
+      )
+      .run();
+    await env.DB.prepare(
+      `INSERT INTO user_page_state
+         (user_id, page_id, favorited_at, last_viewed_at)
+       SELECT ?, id, ?, ? FROM pages WHERE id LIKE 'hidden-padding-%'
+       UNION ALL SELECT ?, ?, ?, ?`,
+    )
+      .bind(
+        viewer.id,
+        hiddenTimestamp,
+        hiddenTimestamp,
+        viewer.id,
+        visiblePageId,
+        visibleTimestamp,
+        visibleTimestamp,
+      )
+      .run();
+
+    await expect(service.listRecent(viewer)).resolves.toEqual([
+      expect.objectContaining({ id: visiblePageId }),
+    ]);
+    await expect(service.listFavorites(viewer)).resolves.toEqual([
+      expect.objectContaining({ id: visiblePageId }),
+    ]);
+
+    await env.DB.prepare(
+      `UPDATE pages
+          SET status = 'trashed', trashed_at = ?, trash_batch_id = 'hidden-batch'
+        WHERE id LIKE 'hidden-padding-%'`,
+    )
+      .bind(hiddenTimestamp)
+      .run();
+    await env.DB.prepare(
+      `UPDATE pages
+          SET status = 'trashed', trashed_at = ?, trash_batch_id = 'visible-batch'
+        WHERE id = ?`,
+    )
+      .bind(visibleTimestamp, visiblePageId)
+      .run();
+
+    await expect(service.listTrash(viewer)).resolves.toEqual([
+      expect.objectContaining({ id: visiblePageId }),
+    ]);
+  });
+
+  it("rejects oversized tag replacement bodies before parsing JSON", async () => {
+    const app = new Hono<CoreHonoEnv>();
+    app.onError(coreErrorHandler);
+    app.use("*", async (context, next) => {
+      context.set("identity", editor);
+      await next();
+    });
+    app.route("/api/v1", createOrganizationRoutes());
+
+    const response = await app.request(
+      `https://wiki.example/api/v1/pages/${createUuidV7()}/tags`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ names: ["x".repeat(17_000)] }),
+      },
+      env,
+    );
+
+    expect(response.status).toBe(413);
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: "PAYLOAD_TOO_LARGE" },
+    });
   });
 });
 
