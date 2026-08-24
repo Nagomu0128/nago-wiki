@@ -48,9 +48,12 @@ const MAX_EXPORT_ARCHIVE_BYTES = 32 * 1024 * 1024 * 1024;
 const MAX_EXPORT_PLAN_BYTES = 8 * 1024 * 1024;
 const MAX_EXPORT_WORKFLOW_STEPS = 25_000;
 const MAX_EXPORT_SNAPSHOT_CAPTURE_ATTEMPTS = 3;
-const MAX_EXPORT_IO_SUBREQUESTS = 9_000;
+// Reserve at least 4,200 of the 10,000 configured subrequests for the two
+// stable-snapshot fences (up to six captures, <=700 metadata reads each).
+const MAX_EXPORT_IO_SUBREQUESTS = 5_000;
 const MAX_EXPORT_METADATA_ITEMS = 50_000;
 const MAX_EXPORT_METADATA_BYTES = 6 * 1024 * 1024;
+const MAX_EXPORT_R2_LIST_PAGES = 50;
 
 export const exportWorkflowParamsSchema = z
   .object({
@@ -1233,13 +1236,18 @@ async function listExportAssets(
   const result: PortableExportAsset[] = [];
   const budget = { items: 0, bytes: 0 };
   let cursor: string | undefined;
+  let pages = 0;
   do {
+    if (pages >= MAX_EXPORT_R2_LIST_PAGES) {
+      throw new Error("Export assets require too many R2 listing requests");
+    }
     const listing = await bucket.list({
       prefix,
       limit: 1_000,
       ...(cursor === undefined ? {} : { cursor }),
       include: ["httpMetadata", "customMetadata"],
     });
+    pages += 1;
     addMetadataBatch(budget, listing.objects, "R2 assets");
     for (const object of listing.objects) {
       if (object.size > MAX_EXPORT_OBJECT_BYTES) {
@@ -1280,13 +1288,18 @@ async function listR2Objects(
   const result: R2Object[] = [];
   const budget = { items: 0, bytes: 0 };
   let cursor: string | undefined;
+  let pages = 0;
   do {
+    if (pages >= MAX_EXPORT_R2_LIST_PAGES) {
+      throw new Error("Export versions require too many R2 listing requests");
+    }
     const listing = await bucket.list({
       prefix,
       limit: 1_000,
       ...(cursor === undefined ? {} : { cursor }),
       include: ["customMetadata"],
     });
+    pages += 1;
     addMetadataBatch(budget, listing.objects, "R2 versions");
     result.push(...listing.objects);
     cursor = listing.truncated ? listing.cursor : undefined;
