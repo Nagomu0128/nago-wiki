@@ -31,6 +31,12 @@ Worker invokes it for `0 18 * * 6` (Sunday 03:00 JST). It starts or resumes one
 idempotent `ExportWorkflow` per active workspace and backup date, then removes
 expired R2 artifacts.
 
+An export plan is an immutable logical snapshot: because D1 and R2 cannot
+share a transaction, the Workflow captures the complete metadata graph twice
+and proceeds only when both observations match. It fences the same graph again
+before publication; a concurrent metadata change fails the export for a retry
+rather than producing a mixed-generation archive.
+
 - The first weekly backup in each Japanese calendar month is the monthly
   representative and is retained for 12 calendar months.
 - Other weekly backups are retained for 90 days.

@@ -47,6 +47,7 @@ const MAX_EXPORT_OBJECT_BYTES = 256 * 1024 * 1024;
 const MAX_EXPORT_ARCHIVE_BYTES = 32 * 1024 * 1024 * 1024;
 const MAX_EXPORT_PLAN_BYTES = 8 * 1024 * 1024;
 const MAX_EXPORT_WORKFLOW_STEPS = 25_000;
+const MAX_EXPORT_SNAPSHOT_CAPTURE_ATTEMPTS = 3;
 
 export const exportWorkflowParamsSchema = z
   .object({
@@ -467,7 +468,7 @@ async function createAndStorePlan(
   environment: McpRuntimeEnv,
   parameters: ExportWorkflowParams,
 ): Promise<PlanStepResult> {
-  const metadata = await collectExportMetadata(
+  const metadata = await collectStableExportMetadata(
     environment,
     parameters.workspaceId,
   );
@@ -624,12 +625,59 @@ async function collectExportMetadata(
   };
 }
 
+/**
+ * D1 and R2 do not share a transaction.  Capture the complete logical graph
+ * twice and only plan an archive when both observations agree.  This bounds
+ * the cost of contention while preventing a plan assembled across two
+ * metadata generations from being published as a snapshot.
+ */
+async function collectStableExportMetadata(
+  environment: Pick<McpRuntimeEnv, "DB" | "FILES">,
+  workspaceId: string,
+) {
+  let previous = await collectExportMetadata(environment, workspaceId);
+  let previousHash = await exportMetadataHash(previous);
+  for (
+    let attempt = 1;
+    attempt < MAX_EXPORT_SNAPSHOT_CAPTURE_ATTEMPTS;
+    attempt += 1
+  ) {
+    const current = await collectExportMetadata(environment, workspaceId);
+    const currentHash = await exportMetadataHash(current);
+    if (currentHash === previousHash) return current;
+    previous = current;
+    previousHash = currentHash;
+  }
+  throw new Error(
+    "Wiki metadata changed while the export snapshot was being captured; retry the export",
+  );
+}
+
+function exportMetadataHash(value: {
+  workspaceName: string;
+  members: PortableExportMember[];
+  pages: PortableExportPage[];
+  versions: PortableExportVersion[];
+  assets: PortableExportAsset[];
+  acl: PortableExportAcl[];
+  tags: PortableExportTag[];
+  pageTags: PortableExportPageTag[];
+  links: PortableExportLink[];
+  aliases: PortableExportAlias[];
+  comments: PortableExportComment[];
+}): Promise<string> {
+  return sha256Bytes(encoder.encode(JSON.stringify(value)));
+}
+
 async function assertExportSnapshotUnchanged(
   environment: Pick<McpRuntimeEnv, "DB" | "FILES">,
   planKey: string,
 ): Promise<void> {
   const plan = await loadPlan(environment.FILES, planKey);
-  const current = await collectExportMetadata(environment, plan.workspaceId);
+  const current = await collectStableExportMetadata(
+    environment,
+    plan.workspaceId,
+  );
   const planned = {
     workspaceName: plan.workspaceName,
     members: plan.members,
@@ -643,12 +691,10 @@ async function assertExportSnapshotUnchanged(
     aliases: plan.aliases,
     comments: plan.comments,
   };
-  const plannedHash = await sha256Bytes(
-    encoder.encode(JSON.stringify(planned)),
-  );
-  const currentHash = await sha256Bytes(
-    encoder.encode(JSON.stringify(current)),
-  );
+  const [plannedHash, currentHash] = await Promise.all([
+    exportMetadataHash(planned),
+    exportMetadataHash(current),
+  ]);
   if (plannedHash !== currentHash) {
     throw new Error(
       "Wiki metadata changed while the export was being created; start a new export",
