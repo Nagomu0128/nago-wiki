@@ -369,19 +369,25 @@ describe("POST /imports idempotency", () => {
     if (live === undefined || orphan === undefined) {
       throw new Error("Missing cursor sweep fixtures");
     }
-    const list = vi.fn(async (options: R2ListOptions) => {
+    const list = vi.fn((options: R2ListOptions) => {
       if (options.prefix === "imports/") {
         if (options.cursor === undefined) {
-          return { objects: [live], truncated: true, cursor: "cursor-page-2" };
+          return Promise.resolve({
+            objects: [live],
+            truncated: true,
+            cursor: "cursor-page-2",
+          });
         }
         if (options.cursor === "cursor-page-2") {
-          return { objects: [orphan], truncated: false };
+          return Promise.resolve({ objects: [orphan], truncated: false });
         }
       }
       if (options.prefix === `imports/${identity.workspaceId}/${orphanId}/`) {
-        return { objects: [orphan], truncated: false };
+        return Promise.resolve({ objects: [orphan], truncated: false });
       }
-      throw new Error(`Unexpected R2 list: ${JSON.stringify(options)}`);
+      return Promise.reject(
+        new Error(`Unexpected R2 list: ${JSON.stringify(options)}`),
+      );
     });
     const files = {
       list,

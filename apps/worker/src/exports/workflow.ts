@@ -635,8 +635,9 @@ async function collectStableExportMetadata(
   environment: Pick<McpRuntimeEnv, "DB" | "FILES">,
   workspaceId: string,
 ) {
-  let previous = await collectExportMetadata(environment, workspaceId);
-  let previousHash = await exportMetadataHash(previous);
+  let previousHash = await exportMetadataHash(
+    await collectExportMetadata(environment, workspaceId),
+  );
   for (
     let attempt = 1;
     attempt < MAX_EXPORT_SNAPSHOT_CAPTURE_ATTEMPTS;
@@ -645,7 +646,6 @@ async function collectStableExportMetadata(
     const current = await collectExportMetadata(environment, workspaceId);
     const currentHash = await exportMetadataHash(current);
     if (currentHash === previousHash) return current;
-    previous = current;
     previousHash = currentHash;
   }
   throw new Error(
