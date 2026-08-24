@@ -43,18 +43,22 @@ export async function consumeAccountLinkCode(
   provider: "discord" | "line",
   externalSubject: string,
   code: string,
+  workspaceId: string,
 ): Promise<boolean> {
   const hash = await sha256Hex(code.trim());
   const linkCode = await database
     .prepare(
-      `SELECT id, user_id, provider
-         FROM account_link_codes
-        WHERE code_hash = ?1
-          AND consumed_at IS NULL
-          AND expires_at > ?2
-          AND (provider IS NULL OR provider = ?3)`,
-    )
-    .bind(hash, new Date().toISOString(), provider)
+        `SELECT codes.id, codes.user_id, codes.provider
+           FROM account_link_codes AS codes
+           JOIN users ON users.id = codes.user_id
+          WHERE codes.code_hash = ?1
+            AND codes.consumed_at IS NULL
+            AND codes.expires_at > ?2
+            AND (codes.provider IS NULL OR codes.provider = ?3)
+            AND users.workspace_id = ?4
+            AND users.status = 'active'`,
+      )
+    .bind(hash, new Date().toISOString(), provider, workspaceId)
     .first<LinkCodeRow>();
   if (linkCode === null) return false;
 
@@ -72,9 +76,15 @@ export async function consumeAccountLinkCode(
     database
       .prepare(
         `UPDATE account_link_codes SET consumed_at = ?2
-          WHERE id = ?1 AND consumed_at IS NULL`,
+          WHERE id = ?1 AND consumed_at IS NULL
+            AND EXISTS (
+              SELECT 1 FROM users
+               WHERE users.id = account_link_codes.user_id
+                 AND users.workspace_id = ?3
+                 AND users.status = 'active'
+            )`,
       )
-      .bind(linkCode.id, marker),
+      .bind(linkCode.id, marker, workspaceId),
     database
       .prepare(
         `INSERT INTO audit_events

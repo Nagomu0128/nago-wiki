@@ -18,6 +18,7 @@ const ownerId = "00000000-0000-7000-8000-000000000010";
 const editorId = "00000000-0000-7000-8000-000000000011";
 const viewerId = "00000000-0000-7000-8000-000000000012";
 const pageId = "00000000-0000-7000-8000-000000000020";
+const childPageId = "00000000-0000-7000-8000-000000000021";
 const otherWorkspaceId = "00000000-0000-7000-8000-000000000002";
 const otherUserId = "00000000-0000-7000-8000-000000000013";
 
@@ -68,6 +69,40 @@ describe("owner administration", () => {
     expect(audit.results.map((event) => event.action)).toContain("member.updated");
   });
 
+  it("keeps an active owner when concurrent updates demote different owners", async () => {
+    const secondOwner = await insertUser(
+      "00000000-0000-7000-8000-000000000014",
+      DEFAULT_WORKSPACE_ID,
+      "owner",
+      "second-owner@example.com",
+    );
+    const service = new AdminService(env.DB);
+    const members = await service.listMembers(owner);
+    const first = members.find((member) => member.id === owner.id);
+    const second = members.find((member) => member.id === secondOwner.id);
+    if (first === undefined || second === undefined) throw new Error("expected owners");
+
+    const outcomes = await Promise.allSettled([
+      service.updateMember(owner, owner.id, {
+        role: "editor",
+        expectedUpdatedAt: first.updatedAt,
+      }),
+      service.updateMember(owner, secondOwner.id, {
+        role: "editor",
+        expectedUpdatedAt: second.updatedAt,
+      }),
+    ]);
+
+    expect(outcomes.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(1);
+    const activeOwners = await env.DB.prepare(
+      `SELECT count(*) AS count FROM users
+        WHERE workspace_id = ?1 AND role = 'owner' AND status = 'active'`,
+    )
+      .bind(DEFAULT_WORKSPACE_ID)
+      .first<{ count: number }>();
+    expect(activeOwners?.count).toBe(1);
+  });
+
   it("replaces a restricted page ACL and hides the page from non-owners", async () => {
     await insertRestrictedPage();
     const service = new AdminService(env.DB);
@@ -115,6 +150,30 @@ describe("owner administration", () => {
         entries: [{ userId: otherUserId, permission: "viewer" }],
       }),
     ).rejects.toMatchObject({ code: "INVALID_REQUEST", status: 400 });
+  });
+
+  it("does not let a child ACL expand access beyond a restricted ancestor", async () => {
+    await insertRestrictedPage();
+    await insertRestrictedChildPage();
+    const service = new AdminService(env.DB);
+
+    await expect(
+      service.replacePageAcl(owner, childPageId, {
+        baseRevision: 0,
+        entries: [{ userId: viewer.id, permission: "viewer" }],
+      }),
+    ).rejects.toMatchObject({ code: "INVALID_REQUEST", status: 400 });
+
+    await service.replacePageAcl(owner, pageId, {
+      baseRevision: 0,
+      entries: [{ userId: viewer.id, permission: "viewer" }],
+    });
+    await expect(
+      service.replacePageAcl(owner, childPageId, {
+        baseRevision: 0,
+        entries: [{ userId: viewer.id, permission: "viewer" }],
+      }),
+    ).resolves.toMatchObject({ pageId: childPageId, revision: 1 });
   });
 
   it("manages provider and channel controls with owner-only routes", async () => {
@@ -173,6 +232,24 @@ describe("owner administration", () => {
       `SELECT status FROM bot_events WHERE provider = 'discord' AND event_id = 'disabled-event'`,
     ).first<{ status: string }>();
     expect(ignored?.status).toBe("ignored");
+
+    await env.DB.prepare(
+      `INSERT INTO bot_events
+         (provider, event_id, user_id, status, response_hash, response_text,
+          created_at, updated_at)
+       VALUES ('discord', 'completed-before-disable', NULL, 'completed', 'hash', 'cached', ?1, ?1)`,
+    )
+      .bind(now)
+      .run();
+    await expect(
+      answerBotQuery(env as McpRuntimeEnv, {
+        provider: "discord",
+        eventId: "completed-before-disable",
+        externalUserId: "external-user",
+        externalChannelId: null,
+        query: "should not replay",
+      }),
+    ).resolves.toBeNull();
 
     const forbidden = await testApp(editor).request(
       "https://wiki.example/api/v1/admin/bots",
@@ -255,5 +332,18 @@ async function insertRestrictedPage(): Promise<void> {
              'restricted', 'active', ?4, ?5, ?5)`,
   )
     .bind(pageId, DEFAULT_WORKSPACE_ID, "a".repeat(64), ownerId, now)
+    .run();
+}
+
+async function insertRestrictedChildPage(): Promise<void> {
+  const now = new Date().toISOString();
+  await env.DB.prepare(
+    `INSERT INTO pages
+       (id, workspace_id, parent_id, slug, title, body_md, revision, content_hash,
+        access_mode, status, created_by, created_at, updated_at)
+     VALUES (?1, ?2, ?3, 'child-secret', 'Child secret', 'private', 1, ?4,
+             'restricted', 'active', ?5, ?6, ?6)`,
+  )
+    .bind(childPageId, DEFAULT_WORKSPACE_ID, pageId, "b".repeat(64), ownerId, now)
     .run();
 }
