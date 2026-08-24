@@ -47,6 +47,13 @@ interface ImportRow {
   expires_at: string | null;
 }
 
+interface ImportApplicationRow extends Record<string, unknown> {
+  import_id: string;
+  page_id: string;
+  accepted_tags_json: string;
+  status: "applying" | "applied";
+}
+
 const googleStateSchema = z.object({
   userId: z.string(),
   expectedEmail: z.email(),
@@ -155,11 +162,12 @@ export function createImportRoutes(): Hono<ImportApi> {
     const importId = crypto.randomUUID();
     const targetPageId = createUuidV7();
     const now = new Date().toISOString();
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1_000).toISOString();
     await context.env.DB.prepare(
       `INSERT INTO imports (
          id, workspace_id, user_id, source_type, source_metadata_json,
-         status, created_at, updated_at
-       ) VALUES (?1, ?2, ?3, 'google_docs', ?4, 'queued', ?5, ?5)`,
+         status, created_at, updated_at, expires_at
+       ) VALUES (?1, ?2, ?3, 'google_docs', ?4, 'queued', ?5, ?5, ?6)`,
     )
       .bind(
         importId,
@@ -167,6 +175,7 @@ export function createImportRoutes(): Hono<ImportApi> {
         userId,
         JSON.stringify({ documentId: request.source.documentId, targetPageId }),
         now,
+        expiresAt,
       )
       .run();
 
@@ -279,64 +288,79 @@ export function createImportRoutes(): Hono<ImportApi> {
         parseJson(value.source_metadata_json),
       );
       if (value.status === "applied" && typeof metadata.pageId === "string") {
-        if (context.req.valid("json").acceptedTags.length > 0) {
-          await new TagsService(context.env.DB).replacePageTags(
-            identity,
-            metadata.pageId,
-            context.req.valid("json").acceptedTags,
-          );
-        }
         return context.json(await createRealtimeWikiCoreService(context.env).getPage(
           identity,
           metadata.pageId,
         ));
       }
-      if (value.status !== "preview_ready") {
+      let application = await getImportApplication(context.env.DB, importId);
+      if (application === null && value.status !== "preview_ready") {
         throw new HTTPException(409, { message: "Import preview is not ready" });
       }
-      if (value.expires_at !== null && value.expires_at <= new Date().toISOString()) {
+      if (
+        application === null &&
+        value.expires_at !== null &&
+        value.expires_at <= new Date().toISOString()
+      ) {
         throw new HTTPException(410, { message: "Import preview has expired" });
       }
-      const previewKey =
-        typeof metadata.previewKey === "string" ? metadata.previewKey : null;
-      if (previewKey === null) {
-        throw new HTTPException(409, { message: "Import preview is unavailable" });
-      }
-      const preview = await context.env.FILES.get(previewKey);
-      if (preview === null || preview.size > 1_048_576) {
-        throw new HTTPException(409, { message: "Import preview is unavailable" });
-      }
-      const request = context.req.valid("json");
-      const targetPageId = typeof metadata.targetPageId === "string"
-        ? metadata.targetPageId
-        : null;
       const report = value.report_r2_key === null
         ? null
         : await readImportReport(context.env.FILES, value.report_r2_key);
-      if (targetPageId === null || report === null) {
+      if (report === null) {
         throw new HTTPException(409, { message: "Import asset report is unavailable" });
       }
-      const page = await createRealtimeWikiCoreService(context.env).createPageWithId(
-        identity,
-        targetPageId,
-        {
-          parentId: request.parentId,
-          title:
-            request.title ??
-            (typeof metadata.title === "string"
-              ? metadata.title
-              : "Imported Google Document"),
-          bodyMd: await preview.text(),
-          accessMode: request.accessMode,
-        },
-        `import:${importId}`,
+      const core = createRealtimeWikiCoreService(context.env);
+      let createdStatus = 200;
+      if (application === null) {
+        const previewKey =
+          typeof metadata.previewKey === "string" ? metadata.previewKey : null;
+        const targetPageId = typeof metadata.targetPageId === "string"
+          ? metadata.targetPageId
+          : null;
+        if (previewKey === null || targetPageId === null) {
+          throw new HTTPException(409, { message: "Import preview is unavailable" });
+        }
+        const preview = await context.env.FILES.get(previewKey);
+        if (preview === null || preview.size > 1_048_576) {
+          throw new HTTPException(409, { message: "Import preview is unavailable" });
+        }
+        const request = context.req.valid("json");
+        try {
+          await core.createImportedPageWithId(
+            identity,
+            targetPageId,
+            {
+              parentId: request.parentId,
+              title:
+                request.title ??
+                (typeof metadata.title === "string"
+                  ? metadata.title
+                  : "Imported Google Document"),
+              bodyMd: await preview.text(),
+              accessMode: request.accessMode,
+            },
+            { importId, acceptedTags: request.acceptedTags },
+          );
+          createdStatus = 201;
+        } catch (error) {
+          application = await getImportApplication(context.env.DB, importId);
+          if (application === null) throw error;
+        }
+        application ??= await getImportApplication(context.env.DB, importId);
+      }
+      if (application === null) {
+        throw new HTTPException(503, { message: "Import application could not be resumed" });
+      }
+      const acceptedTags = z.array(z.string().trim().min(1).max(100)).max(50).parse(
+        parseJson(application.accepted_tags_json),
       );
       try {
         await finalizeGoogleImportAssets({
           files: context.env.FILES,
           workspaceId: identity.workspaceId,
           importId,
-          pageId: page.page.id,
+          pageId: application.page_id,
           uploadedBy: identity.id,
           assets: report.assets,
         });
@@ -344,34 +368,54 @@ export function createImportRoutes(): Hono<ImportApi> {
         console.error(JSON.stringify({
           message: "Google import asset finalization failed",
           importId,
-          pageId: page.page.id,
-          error: error instanceof Error ? error.message : String(error),
+          pageId: application.page_id,
+          error: publicImportError(error),
         }));
         throw new HTTPException(503, {
           message: "Imported images could not be finalized; retry the import",
         });
       }
-      if (request.acceptedTags.length > 0) {
-        await new TagsService(context.env.DB).replacePageTags(
-          identity,
-          page.page.id,
-          request.acceptedTags,
-        );
-      }
-      await context.env.DB.prepare(
-        `UPDATE imports
-            SET status = 'applied',
-                source_metadata_json = json_set(source_metadata_json, '$.pageId', ?2),
-                updated_at = ?3
-          WHERE id = ?1 AND status = 'preview_ready'`,
-      )
-        .bind(importId, page.page.id, new Date().toISOString())
-        .run();
-      return context.json(page, 201);
+      await new TagsService(context.env.DB).replaceImportedPageTags(
+        identity.workspaceId,
+        application.page_id,
+        acceptedTags,
+      );
+      const finalizedAt = new Date().toISOString();
+      await context.env.DB.batch([
+        context.env.DB.prepare(
+          `UPDATE import_applications
+              SET status = 'applied', updated_at = ?2
+            WHERE import_id = ?1 AND status = 'applying'`,
+        ).bind(importId, finalizedAt),
+        context.env.DB.prepare(
+          `UPDATE imports
+              SET status = 'applied',
+                  source_metadata_json = json_set(source_metadata_json, '$.pageId', ?2),
+                  updated_at = ?3
+            WHERE id = ?1`,
+        ).bind(importId, application.page_id, finalizedAt),
+      ]);
+      return context.json(
+        await core.getPage(identity, application.page_id),
+        createdStatus === 201 ? 201 : 200,
+      );
     },
   );
 
   return routes;
+}
+
+async function getImportApplication(
+  database: D1Database,
+  importId: string,
+): Promise<ImportApplicationRow | null> {
+  return database.prepare(
+    `SELECT import_id, page_id, accepted_tags_json, status
+       FROM import_applications
+      WHERE import_id = ?1`,
+  )
+    .bind(importId)
+    .first<ImportApplicationRow>();
 }
 
 async function readImportReport(
@@ -461,4 +505,9 @@ function parseJson(value: string | null): unknown {
   } catch {
     return null;
   }
+}
+
+function publicImportError(error: unknown): string {
+  const message = error instanceof Error ? error.message : "asset finalization failed";
+  return message.replace(/https?:\/\/\S+/giu, "[redacted URL]").slice(0, 300);
 }

@@ -18,6 +18,7 @@ import { assertMarkdownSize, hashMarkdown, normalizeSlug } from "./markdown";
 import {
   D1WikiRepository,
   pageNotFound,
+  type ImportApplicationReservation,
   type PageVersionStorageRecord,
 } from "./repository";
 
@@ -245,11 +246,24 @@ export class D1WikiCoreService implements WikiCoreService {
     return this.createPageInternal(identity, request, idempotencyKey, pageId);
   }
 
+  public async createImportedPageWithId(
+    identity: AuthenticatedIdentity,
+    pageId: string,
+    request: CreatePageRequest,
+    application: ImportApplicationReservation,
+  ): Promise<PageWithPermission> {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(pageId)) {
+      throw new ApiProblem("INVALID_REQUEST", 400, "The supplied page ID is invalid");
+    }
+    return this.createPageInternal(identity, request, undefined, pageId, application);
+  }
+
   private async createPageInternal(
     identity: AuthenticatedIdentity,
     request: CreatePageRequest,
     idempotencyKey?: string,
     requestedPageId?: string,
+    importApplication?: ImportApplicationReservation,
   ): Promise<PageWithPermission> {
     assertWorkspaceEditor(identity);
     if (request.parentId !== null) {
@@ -344,6 +358,7 @@ export class D1WikiCoreService implements WikiCoreService {
           ? "editor"
           : null,
         idempotency,
+        importApplication,
       );
     } catch (error) {
       if (
