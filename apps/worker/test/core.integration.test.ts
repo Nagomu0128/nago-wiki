@@ -518,6 +518,37 @@ describe("D1 wiki core", () => {
       ),
     ).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT", status: 409 });
   });
+
+  it("reserves a stable page ID for retryable imports", async () => {
+    const request = {
+      parentId: null,
+      title: "Imported page",
+      bodyMd: "![image](/api/v1/pages/reserved/assets/image)",
+      accessMode: "workspace" as const,
+    };
+    const pageId = createUuidV7();
+    const created = await service.createPageWithId(
+      editor,
+      pageId,
+      request,
+      "import:one",
+    );
+    const replay = await service.createPageWithId(
+      editor,
+      pageId,
+      request,
+      "import:one",
+    );
+
+    expect(created.page.id).toBe(pageId);
+    expect(replay.page.id).toBe(pageId);
+    await expect(service.createPageWithId(
+      editor,
+      createUuidV7(),
+      request,
+      "import:one",
+    )).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT", status: 409 });
+  });
 });
 
 async function resetDatabase(): Promise<void> {

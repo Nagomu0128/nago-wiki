@@ -10,6 +10,11 @@ import {
 } from "./google-client";
 import { GoogleTokenVault } from "./token-vault";
 import type { ImportWorkflowParams } from "./workflow";
+import {
+  finalizeGoogleImportAssets,
+  type ImportedGoogleAsset,
+} from "./google-inline-images";
+import { createUuidV7 } from "../core/ids";
 import { createRealtimeWikiCoreService } from "../core/realtime-mutations";
 import { TagsService } from "../core/tags-service";
 import type { McpRuntimeEnv } from "../mcp/types";
@@ -148,6 +153,7 @@ export function createImportRoutes(): Hono<ImportApi> {
     }
     const request = context.req.valid("json");
     const importId = crypto.randomUUID();
+    const targetPageId = createUuidV7();
     const now = new Date().toISOString();
     await context.env.DB.prepare(
       `INSERT INTO imports (
@@ -159,7 +165,7 @@ export function createImportRoutes(): Hono<ImportApi> {
         importId,
         identity.workspaceId,
         userId,
-        JSON.stringify({ documentId: request.source.documentId }),
+        JSON.stringify({ documentId: request.source.documentId, targetPageId }),
         now,
       )
       .run();
@@ -168,6 +174,7 @@ export function createImportRoutes(): Hono<ImportApi> {
       importId,
       workspaceId: identity.workspaceId,
       requestedBy: userId,
+      targetPageId,
       source: request.source,
     };
     try {
@@ -300,8 +307,18 @@ export function createImportRoutes(): Hono<ImportApi> {
         throw new HTTPException(409, { message: "Import preview is unavailable" });
       }
       const request = context.req.valid("json");
-      const page = await createRealtimeWikiCoreService(context.env).createPage(
+      const targetPageId = typeof metadata.targetPageId === "string"
+        ? metadata.targetPageId
+        : null;
+      const report = value.report_r2_key === null
+        ? null
+        : await readImportReport(context.env.FILES, value.report_r2_key);
+      if (targetPageId === null || report === null) {
+        throw new HTTPException(409, { message: "Import asset report is unavailable" });
+      }
+      const page = await createRealtimeWikiCoreService(context.env).createPageWithId(
         identity,
+        targetPageId,
         {
           parentId: request.parentId,
           title:
@@ -314,6 +331,26 @@ export function createImportRoutes(): Hono<ImportApi> {
         },
         `import:${importId}`,
       );
+      try {
+        await finalizeGoogleImportAssets({
+          files: context.env.FILES,
+          workspaceId: identity.workspaceId,
+          importId,
+          pageId: page.page.id,
+          uploadedBy: identity.id,
+          assets: report.assets,
+        });
+      } catch (error) {
+        console.error(JSON.stringify({
+          message: "Google import asset finalization failed",
+          importId,
+          pageId: page.page.id,
+          error: error instanceof Error ? error.message : String(error),
+        }));
+        throw new HTTPException(503, {
+          message: "Imported images could not be finalized; retry the import",
+        });
+      }
       if (request.acceptedTags.length > 0) {
         await new TagsService(context.env.DB).replacePageTags(
           identity,
@@ -340,12 +377,24 @@ export function createImportRoutes(): Hono<ImportApi> {
 async function readImportReport(
   files: R2Bucket,
   key: string,
-): Promise<{ warnings: string[] } | null> {
+): Promise<{ warnings: string[]; assets: ImportedGoogleAsset[] } | null> {
   const object = await files.get(key);
   if (object === null || object.size > 1_048_576) return null;
   try {
     const parsed = z.object({
       warnings: z.array(z.string().max(1_000)).max(100).default([]),
+      assets: z.array(z.object({
+        objectId: z.string().min(1).max(500),
+        assetId: z.uuid(),
+        filename: z.string().min(1).max(200),
+        contentType: z.enum(["image/png", "image/jpeg", "image/gif", "image/webp"]),
+        size: z.number().int().positive().max(10 * 1024 * 1024),
+        sha256: z.string().regex(/^[0-9a-f]{64}$/u),
+        stagingKey: z.string().min(1).max(2_048),
+        finalKey: z.string().min(1).max(2_048),
+        url: z.string().min(1).max(2_048).startsWith("/api/v1/pages/"),
+        altText: z.string().max(500),
+      })).max(50).default([]),
     }).safeParse(await object.json());
     return parsed.success ? parsed.data : null;
   } catch {

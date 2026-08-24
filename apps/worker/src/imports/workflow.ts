@@ -4,12 +4,17 @@ import { z } from "zod";
 
 import { fetchGoogleDocument } from "./google-client";
 import { googleDocumentToMarkdown } from "./google-docs-parser";
+import {
+  importGoogleInlineImages,
+  replaceGoogleInlineObjectLinks,
+} from "./google-inline-images";
 import type { McpRuntimeEnv } from "../mcp/types";
 
 const importWorkflowParamsSchema = z.object({
   importId: z.string().min(1),
   workspaceId: z.string().min(1),
   requestedBy: z.string().min(1),
+  targetPageId: z.uuid(),
   source: z.object({
     type: z.literal("google_docs"),
     documentId: z.string().min(1).max(256),
@@ -74,10 +79,23 @@ export class ImportWorkflow extends WorkflowEntrypoint<
         const object = await this.env.FILES.get(source.sourceKey);
         if (object === null) throw new Error("Stored import source was not found");
         const conversion = googleDocumentToMarkdown(await object.json());
+        const imageImport = await importGoogleInlineImages({
+          files: this.env.FILES,
+          workspaceId: parameters.workspaceId,
+          importId: parameters.importId,
+          targetPageId: parameters.targetPageId,
+          images: conversion.inlineImages,
+        });
+        const warnings = [...conversion.warnings, ...imageImport.warnings];
+        const markdown = replaceGoogleInlineObjectLinks(
+          conversion.markdown,
+          conversion.inlineObjectIds,
+          imageImport.assets,
+        );
         const previewKey = `imports/${parameters.workspaceId}/${parameters.importId}/preview.md`;
         const reportKey = `imports/${parameters.workspaceId}/${parameters.importId}/report.json`;
         await Promise.all([
-          this.env.FILES.put(previewKey, conversion.markdown, {
+          this.env.FILES.put(previewKey, markdown, {
             httpMetadata: { contentType: "text/markdown; charset=utf-8" },
           }),
           this.env.FILES.put(
@@ -85,7 +103,8 @@ export class ImportWorkflow extends WorkflowEntrypoint<
             JSON.stringify({
               title: conversion.title,
               inlineObjectIds: conversion.inlineObjectIds,
-              warnings: conversion.warnings,
+              assets: imageImport.assets,
+              warnings,
             }),
             { httpMetadata: { contentType: "application/json; charset=utf-8" } },
           ),
@@ -94,7 +113,7 @@ export class ImportWorkflow extends WorkflowEntrypoint<
           previewKey,
           reportKey,
           title: conversion.title || source.title,
-          warnings: conversion.warnings.length,
+          warnings: warnings.length,
         } satisfies PreviewStepResult;
       });
 

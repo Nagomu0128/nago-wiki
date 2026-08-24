@@ -230,6 +230,27 @@ export class D1WikiCoreService implements WikiCoreService {
     request: CreatePageRequest,
     idempotencyKey?: string,
   ): Promise<PageWithPermission> {
+    return this.createPageInternal(identity, request, idempotencyKey);
+  }
+
+  public async createPageWithId(
+    identity: AuthenticatedIdentity,
+    pageId: string,
+    request: CreatePageRequest,
+    idempotencyKey: string,
+  ): Promise<PageWithPermission> {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(pageId)) {
+      throw new ApiProblem("INVALID_REQUEST", 400, "The supplied page ID is invalid");
+    }
+    return this.createPageInternal(identity, request, idempotencyKey, pageId);
+  }
+
+  private async createPageInternal(
+    identity: AuthenticatedIdentity,
+    request: CreatePageRequest,
+    idempotencyKey?: string,
+    requestedPageId?: string,
+  ): Promise<PageWithPermission> {
     assertWorkspaceEditor(identity);
     if (request.parentId !== null) {
       await this.requirePage(identity, request.parentId, true, false);
@@ -266,6 +287,9 @@ export class D1WikiCoreService implements WikiCoreService {
         }
         const existingPage = await this.repository.getPage(existing.pageId);
         if (existingPage === null) throw idempotencyConflict();
+        if (requestedPageId !== undefined && existingPage.id !== requestedPageId) {
+          throw idempotencyConflict();
+        }
         return this.toPageResponse(identity, existingPage);
       }
       if (existing !== null) {
@@ -283,7 +307,7 @@ export class D1WikiCoreService implements WikiCoreService {
       };
     }
     const now = new Date().toISOString();
-    const pageId = createUuidV7();
+    const pageId = requestedPageId ?? createUuidV7();
     const contentHash = await hashMarkdown(request.bodyMd);
     const page: Page = {
       id: pageId,
