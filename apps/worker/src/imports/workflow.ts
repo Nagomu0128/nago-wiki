@@ -2,7 +2,7 @@ import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import { z } from "zod";
 
-import { fetchGoogleDocument } from "./google-client";
+import { fetchGoogleDocument, googleRetryDelay } from "./google-client";
 import { googleDocumentToMarkdown } from "./google-docs-parser";
 import {
   importGoogleInlineImages,
@@ -53,7 +53,14 @@ export class ImportWorkflow extends WorkflowEntrypoint<
         return { status: "running" as const };
       });
 
-      const source = await step.do("fetch Google document", async () => {
+      const source = await step.do("fetch Google document", {
+        retries: {
+          limit: 5,
+          delay: ({ error }) => googleRetryDelay(error),
+          backoff: "exponential",
+        },
+        timeout: "5 minutes",
+      }, async () => {
         const document = await fetchGoogleDocument(
           this.env,
           parameters.requestedBy,
@@ -75,9 +82,18 @@ export class ImportWorkflow extends WorkflowEntrypoint<
         return { sourceKey, title } satisfies SourceStepResult;
       });
 
-      const preview = await step.do("convert document preview", async () => {
+      const preview = await step.do("convert document preview", {
+        retries: {
+          limit: 5,
+          delay: ({ error }) => googleRetryDelay(error),
+          backoff: "exponential",
+        },
+        timeout: "10 minutes",
+      }, async () => {
         const object = await this.env.FILES.get(source.sourceKey);
-        if (object === null) throw new Error("Stored import source was not found");
+        if (object === null || object.size > 20 * 1024 * 1024) {
+          throw new Error("Stored import source was not found");
+        }
         const conversion = googleDocumentToMarkdown(await object.json());
         const imageImport = await importGoogleInlineImages({
           files: this.env.FILES,
@@ -86,12 +102,16 @@ export class ImportWorkflow extends WorkflowEntrypoint<
           targetPageId: parameters.targetPageId,
           images: conversion.inlineImages,
         });
-        const warnings = [...conversion.warnings, ...imageImport.warnings];
+        const warnings = boundedGoogleWarnings([
+          ...conversion.warnings,
+          ...imageImport.warnings,
+        ]);
         const markdown = replaceGoogleInlineObjectLinks(
           conversion.markdown,
           conversion.inlineObjectIds,
           imageImport.assets,
         );
+        assertGooglePreviewSize(markdown);
         const previewKey = `imports/${parameters.workspaceId}/${parameters.importId}/preview.md`;
         const reportKey = `imports/${parameters.workspaceId}/${parameters.importId}/report.json`;
         await Promise.all([
@@ -180,4 +200,20 @@ function documentTitle(document: unknown): string {
 function publicErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : "Import failed";
   return message.replace(/Bearer\s+\S+/giu, "Bearer [redacted]").slice(0, 1_000);
+}
+
+export function boundedGoogleWarnings(values: string[]): string[] {
+  const unique = new Set<string>();
+  for (const value of values) {
+    const warning = value.replace(/https?:\/\/\S+/giu, "[redacted URL]").slice(0, 1_000);
+    if (warning.length > 0) unique.add(warning);
+    if (unique.size === 100) break;
+  }
+  return [...unique];
+}
+
+export function assertGooglePreviewSize(markdown: string): void {
+  if (new TextEncoder().encode(markdown).byteLength > 1_048_576) {
+    throw new Error("Converted Google document exceeds the 1 MiB page limit");
+  }
 }

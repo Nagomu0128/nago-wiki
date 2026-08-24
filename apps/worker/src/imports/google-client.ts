@@ -2,6 +2,17 @@ import { z } from "zod";
 
 import { GoogleTokenVault, type GoogleToken } from "./token-vault";
 
+const MAX_GOOGLE_DOCUMENT_BYTES = 20 * 1024 * 1024;
+const DEFAULT_RETRY_DELAY_MS = 5_000;
+const MAX_RETRY_DELAY_MS = 60 * 60 * 1_000;
+
+export class GoogleRetriableError extends Error {
+  public constructor(message: string, public readonly retryAfterMs: number) {
+    super(message);
+    this.name = "GoogleRetriableError";
+  }
+}
+
 const tokenResponseSchema = z.object({
   access_token: z.string().min(1),
   expires_in: z.number().int().positive(),
@@ -36,18 +47,20 @@ export async function exchangeGoogleAuthorizationCode(
       grant_type: "authorization_code",
     }),
   });
-  if (!response.ok) {
-    throw new Error(`Google authorization failed with status ${String(response.status)}`);
-  }
+  assertGoogleResponse(response, "Google authorization");
   const value = tokenResponseSchema.parse(await response.json());
   const identityResponse = await fetch(
     "https://openidconnect.googleapis.com/v1/userinfo",
     { headers: { authorization: `Bearer ${value.access_token}` } },
   );
+  assertGoogleResponse(identityResponse, "Google identity lookup");
   const identity = z
     .object({ email: z.email(), email_verified: z.boolean() })
     .parse(await identityResponse.json());
-  if (!identityResponse.ok || !identity.email_verified || identity.email !== expectedEmail) {
+  if (
+    !identity.email_verified ||
+    !googleEmailsMatch(identity.email, expectedEmail)
+  ) {
     throw new Error("Google import account must match the active wiki member email");
   }
   const vault = tokenVault(environment);
@@ -70,17 +83,19 @@ export async function fetchGoogleDocument(
     `https://docs.googleapis.com/v1/documents/${encodeURIComponent(documentId)}`,
   );
   url.searchParams.set("includeTabsContent", "true");
-  const response = await fetch(url, {
-    headers: { authorization: `Bearer ${accessToken}` },
-  });
-  if (!response.ok) {
-    throw new Error(`Google Docs fetch failed with status ${String(response.status)}`);
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      headers: { authorization: `Bearer ${accessToken}` },
+    });
+  } catch {
+    throw new GoogleRetriableError(
+      "Google Docs request could not be completed",
+      DEFAULT_RETRY_DELAY_MS,
+    );
   }
-  const contentLength = Number(response.headers.get("content-length") ?? "0");
-  if (contentLength > 20 * 1024 * 1024) {
-    throw new Error("Google document exceeds the 20 MiB import limit");
-  }
-  return response.json();
+  assertGoogleResponse(response, "Google Docs fetch");
+  return readBoundedGoogleJson(response, MAX_GOOGLE_DOCUMENT_BYTES);
 }
 
 export async function getGoogleAccessToken(
@@ -113,9 +128,7 @@ async function refreshAccessToken(
       grant_type: "refresh_token",
     }),
   });
-  if (!response.ok) {
-    throw new Error(`Google token refresh failed with status ${String(response.status)}`);
-  }
+  assertGoogleResponse(response, "Google token refresh");
   const value = tokenResponseSchema.parse(await response.json());
   return {
     accessToken: value.access_token,
@@ -127,4 +140,113 @@ async function refreshAccessToken(
 
 function tokenVault(environment: GoogleImportEnvironment): GoogleTokenVault {
   return new GoogleTokenVault(environment.OAUTH_KV, environment.TOKEN_ENCRYPTION_KEY);
+}
+
+export async function readBoundedGoogleJson(
+  response: Response,
+  maxBytes: number,
+): Promise<unknown> {
+  const declaredLength = parseContentLength(response.headers.get("content-length"));
+  if (declaredLength !== null && declaredLength > maxBytes) {
+    await response.body?.cancel();
+    throw new Error("Google document exceeds the 20 MiB import limit");
+  }
+  if (response.body === null) {
+    throw new GoogleRetriableError(
+      "Google Docs returned an empty response body",
+      DEFAULT_RETRY_DELAY_MS,
+    );
+  }
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let received = 0;
+  try {
+    let result = await reader.read();
+    while (!result.done) {
+      received += result.value.byteLength;
+      if (received > maxBytes) {
+        await reader.cancel();
+        throw new Error("Google document exceeds the 20 MiB import limit");
+      }
+      chunks.push(result.value);
+      result = await reader.read();
+    }
+  } catch (error) {
+    if (error instanceof GoogleRetriableError || isImportLimitError(error)) throw error;
+    throw new GoogleRetriableError(
+      "Google Docs response was interrupted",
+      DEFAULT_RETRY_DELAY_MS,
+    );
+  } finally {
+    reader.releaseLock();
+  }
+  if (declaredLength !== null && declaredLength !== received) {
+    throw new GoogleRetriableError(
+      "Google Docs response length did not match Content-Length",
+      DEFAULT_RETRY_DELAY_MS,
+    );
+  }
+
+  const bytes = new Uint8Array(received);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try {
+    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+  } catch {
+    throw new Error("Google Docs returned invalid JSON");
+  }
+}
+
+export function googleRetryDelay(error: Error): number {
+  return error instanceof GoogleRetriableError
+    ? error.retryAfterMs
+    : DEFAULT_RETRY_DELAY_MS;
+}
+
+function assertGoogleResponse(response: Response, operation: string): void {
+  if (response.ok) return;
+  if (response.status === 429 || response.status >= 500) {
+    throw new GoogleRetriableError(
+      `${operation} temporarily failed with status ${String(response.status)}`,
+      retryAfterMilliseconds(response.headers.get("retry-after")),
+    );
+  }
+  throw new Error(`${operation} failed with status ${String(response.status)}`);
+}
+
+function retryAfterMilliseconds(value: string | null): number {
+  if (value !== null && /^\d{1,7}$/u.test(value.trim())) {
+    return clampRetryDelay(Number(value.trim()) * 1_000);
+  }
+  if (value !== null) {
+    const retryAt = Date.parse(value);
+    if (Number.isFinite(retryAt)) return clampRetryDelay(retryAt - Date.now());
+  }
+  return DEFAULT_RETRY_DELAY_MS;
+}
+
+function clampRetryDelay(value: number): number {
+  return Math.max(1_000, Math.min(MAX_RETRY_DELAY_MS, value));
+}
+
+function parseContentLength(value: string | null): number | null {
+  if (value === null || !/^\d{1,12}$/u.test(value)) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+function isImportLimitError(error: unknown): boolean {
+  return error instanceof Error && error.message === "Google document exceeds the 20 MiB import limit";
+}
+
+export function googleEmailsMatch(left: string, right: string): boolean {
+  return normalizeEmail(left) === normalizeEmail(right);
+}
+
+function normalizeEmail(value: string): string {
+  return value.trim().normalize("NFKC").toLocaleLowerCase("en-US");
 }

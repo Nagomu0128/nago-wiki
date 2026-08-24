@@ -6,6 +6,7 @@ import {
   importGoogleInlineImages,
   replaceGoogleInlineObjectLinks,
 } from "../../src/imports/google-inline-images";
+import { GoogleRetriableError } from "../../src/imports/google-client";
 
 describe("Google Docs inline image import", () => {
   it("sniffs, stages, and renders a protected page asset", async () => {
@@ -57,5 +58,45 @@ describe("Google Docs inline image import", () => {
       ["missing"],
       [],
     )).toBe("before _[Google Docs image could not be imported]_ after");
+  });
+
+  it("propagates transient Google image failures for Workflow retry", async () => {
+    const promise = importGoogleInlineImages({
+      files: env.FILES,
+      workspaceId: "workspace-1",
+      importId: "import-transient",
+      targetPageId: "0198f8dd-a20b-7000-8000-000000000001",
+      images: [{
+        objectId: "image-429",
+        contentUri: "https://images.example/short-lived-token",
+        altText: "diagram",
+      }],
+      fetchImage: () => Promise.resolve(new Response(null, {
+        status: 429,
+        headers: { "retry-after": "7" },
+      })),
+    });
+
+    await expect(promise).rejects.toMatchObject({
+      retryAfterMs: 7_000,
+    } satisfies Partial<GoogleRetriableError>);
+  });
+
+  it("keeps unsupported individual images as permanent warnings", async () => {
+    const result = await importGoogleInlineImages({
+      files: env.FILES,
+      workspaceId: "workspace-1",
+      importId: "import-unsupported",
+      targetPageId: "0198f8dd-a20b-7000-8000-000000000001",
+      images: [{
+        objectId: "image-bad",
+        contentUri: "https://images.example/short-lived-token",
+        altText: "diagram",
+      }],
+      fetchImage: () => Promise.resolve(new Response("not an image")),
+    });
+
+    expect(result.assets).toEqual([]);
+    expect(result.warnings).toHaveLength(1);
   });
 });
