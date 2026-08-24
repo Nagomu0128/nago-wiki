@@ -7,4 +7,9 @@ describe("Access-protected API paths", () => {
     expect(accessProtectedApiPaths).toContain("/api/v1/imports/google/authorize");
     expect(accessProtectedApiPaths).toContain("/api/v1/imports/google/picker-config");
   });
+
+  it("protects all account-link and owner-control routes", () => {
+    expect(accessProtectedApiPaths).toContain("/api/v1/account-links/*");
+    expect(accessProtectedApiPaths).toContain("/api/v1/admin/*");
+  });
 });
