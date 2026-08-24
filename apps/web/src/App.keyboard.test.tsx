@@ -17,6 +17,7 @@ const api = {
     });
   },
   getTree() { return Promise.resolve([]); },
+  getFavoritePages() { return Promise.resolve([]); },
 } as unknown as WikiApi;
 
 const unusedRealtime = {} as RealtimeProviderFactory;

@@ -135,8 +135,12 @@ interface KnowledgeEditorProps {
   suggestionProvider?: WikiLinkSuggestionProvider;
   onSaved?: (resource: PageResource) => void;
   onMoved?: (resource: PageResource) => void;
+  onPageCreated?: (resource: PageResource) => void;
+  onRequestMove?: () => void;
   onTrashed?: (pageIds: string[]) => void;
+  onOpenBacklinks?: () => void;
   onOpenComments?: () => void;
+  onOpenTags?: () => void;
   onOpenVersions?: () => void;
   surfaceComponent?: EditorSurfaceComponent;
 }
@@ -157,8 +161,12 @@ export function KnowledgeEditor({
   suggestionProvider,
   onSaved,
   onMoved,
+  onPageCreated,
+  onRequestMove,
   onTrashed,
+  onOpenBacklinks,
   onOpenComments,
+  onOpenTags,
   onOpenVersions,
   surfaceComponent: Surface = CrepeSurface,
 }: KnowledgeEditorProps) {
@@ -176,6 +184,7 @@ export function KnowledgeEditor({
   const [wikiQuery, setWikiQuery] = useState<string | null>(null);
   const [wikiCandidates, setWikiCandidates] = useState<WikiLinkCandidate[]>([]);
   const [candidateIndex, setCandidateIndex] = useState(0);
+  const [creatingWikiPage, setCreatingWikiPage] = useState(false);
   const document = useMemo(() => new Y.Doc(), []);
   const surfaceRef = useRef<EditorSurfaceHandle>(null);
   const sourceRef = useRef<HTMLTextAreaElement>(null);
@@ -186,6 +195,9 @@ export function KnowledgeEditor({
   // until the first Yjs sync prevents an independently seeded document from
   // merging duplicate Markdown into the canonical PageRoom document.
   const readOnly = permission === "viewer" || realtimeStatus !== "connected";
+  const brokenLinkTitle = wikiQuery === null ? "" : wikiLinkPageTitle(wikiQuery);
+  const canCreateWikiPage = !readOnly && brokenLinkTitle.length > 0;
+  const wikiOptionCount = wikiCandidates.length + (canCreateWikiPage ? 1 : 0);
 
   useEffect(() => () => { document.destroy(); }, [document]);
 
@@ -342,18 +354,44 @@ export function KnowledgeEditor({
     setWikiQuery(null);
   };
 
+  const createLinkedPage = async () => {
+    if (!canCreateWikiPage || creatingWikiPage) return;
+    setCreatingWikiPage(true);
+    setSaveError(null);
+    try {
+      const created = await api.createPage({
+        parentId: null,
+        title: brokenLinkTitle,
+      });
+      selectWikiCandidate({
+        pageId: created.page.id,
+        path: `/${created.page.slug}`,
+        title: created.page.title,
+      });
+      onPageCreated?.(created);
+    } catch (error) {
+      setSaveError(error instanceof Error ? error : new Error(String(error)));
+      setSaveStatus("error");
+    } finally {
+      setCreatingWikiPage(false);
+    }
+  };
+
   const handleSourceKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (!wikiCandidates.length) return;
+    if (wikiOptionCount === 0) return;
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
       const delta = event.key === "ArrowDown" ? 1 : -1;
-      setCandidateIndex((current) => (current + delta + wikiCandidates.length) % wikiCandidates.length);
+      setCandidateIndex((current) => (current + delta + wikiOptionCount) % wikiOptionCount);
     }
     if (event.key === "Enter" && wikiQuery !== null) {
       const candidate = wikiCandidates[candidateIndex];
       if (candidate) {
         event.preventDefault();
         selectWikiCandidate(candidate);
+      } else if (canCreateWikiPage && candidateIndex === wikiCandidates.length) {
+        event.preventDefault();
+        void createLinkedPage();
       }
     }
     if (event.key === "Escape") setWikiQuery(null);
@@ -408,6 +446,11 @@ export function KnowledgeEditor({
         value={title}
       />
 
+      <div className="page-tag-row" aria-label="ページのタグ">
+        {resource.tags.map((tag) => <span key={tag.id}>#{tag.name}</span>)}
+        <button onClick={onOpenTags} type="button">{resource.tags.length === 0 ? "+ タグを追加" : "編集"}</button>
+      </div>
+
       <div className="editor-commandbar">
         <div className="mode-switch" role="group" aria-label="編集モード">
           <button aria-pressed={mode === "visual"} onClick={() => { switchMode("visual"); }} type="button">ビジュアル</button>
@@ -415,12 +458,15 @@ export function KnowledgeEditor({
         </div>
         <span className="editor-hint">`#`、`- [ ]`、`[[` の入力ショートカット</span>
         <div className="editor-actions">
+          <button className="text-button" onClick={onOpenTags} type="button">タグ</button>
+          <button className="text-button" onClick={onOpenBacklinks} type="button">リンク元</button>
           <button className="text-button" onClick={onOpenComments} type="button">コメント</button>
           <button className="text-button" onClick={onOpenVersions} type="button">履歴</button>
           <details className="page-menu">
             <summary aria-label="ページ操作">•••</summary>
             <div>
               <button onClick={() => { runPageAction(moveToRoot); }} type="button">ルートへ移動</button>
+              <button onClick={onRequestMove} type="button">ページを移動…</button>
               <button className="danger" onClick={() => { runPageAction(trash); }} type="button">ゴミ箱へ移動</button>
             </div>
           </details>
@@ -465,7 +511,7 @@ export function KnowledgeEditor({
           />
         )}
 
-        {wikiQuery !== null && wikiCandidates.length > 0 && (
+        {wikiQuery !== null && wikiOptionCount > 0 && (
           <div aria-label="Wikiリンク候補" className="wiki-link-popover" role="listbox">
             <small>ページへリンク</small>
             {wikiCandidates.map((candidate, index) => (
@@ -479,6 +525,19 @@ export function KnowledgeEditor({
                 <strong>{candidate.title}</strong><span>{candidate.path}</span>
               </button>
             ))}
+            {canCreateWikiPage && (
+              <button
+                aria-selected={candidateIndex === wikiCandidates.length}
+                className="wiki-link-create"
+                disabled={creatingWikiPage}
+                onClick={() => { void createLinkedPage(); }}
+                role="option"
+                type="button"
+              >
+                <strong>{creatingWikiPage ? "作成中…" : `「${brokenLinkTitle}」を新規作成`}</strong>
+                <span>作成後、この位置へWikiリンクを挿入します</span>
+              </button>
+            )}
           </div>
         )}
       </div>
@@ -499,4 +558,9 @@ export function KnowledgeEditor({
       )}
     </article>
   );
+}
+
+function wikiLinkPageTitle(query: string): string {
+  const target = query.split("|", 1)[0]?.trim() ?? "";
+  return target.split("/").filter(Boolean).at(-1)?.trim().slice(0, 500) ?? "";
 }
