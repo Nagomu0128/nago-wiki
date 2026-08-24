@@ -10,7 +10,7 @@
   },
   "limits": {
     "cpu_ms": 300000,
-    "subrequests": 10000,
+    "subrequests": 50000,
   },
   "assets": {
     "directory": "../web/dist",
