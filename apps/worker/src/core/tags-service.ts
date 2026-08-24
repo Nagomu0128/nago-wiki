@@ -20,6 +20,9 @@ export class TagsService {
   }
 
   public async listVisible(identity: AuthenticatedIdentity): Promise<WikiTag[]> {
+    if (identity.status !== "active") {
+      throw new ApiProblem("FORBIDDEN", 403, "This account is suspended");
+    }
     const tree = await this.repository.listVisiblePageTree(identity);
     const visiblePageIds = new Set<string>();
     const visit = (nodes: typeof tree): void => {
