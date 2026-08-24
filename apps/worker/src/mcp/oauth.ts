@@ -7,6 +7,8 @@ import { WorkerEntrypoint } from "cloudflare:workers";
 import { z } from "zod";
 
 import { recordAuditEvent } from "../core/audit-events";
+import { readBoundedText } from "../core/bounded-body";
+import { ApiProblem } from "../core/errors";
 import { McpApiHandler } from "./handler";
 import { escapeHtml } from "./security";
 import type { McpAuthProps, McpRuntimeEnv } from "./types";
@@ -51,6 +53,7 @@ interface UserRow {
 
 const consentCookie = "__Host-MCP_CONSENT";
 const stateCookie = "__Host-MCP_GOOGLE_STATE";
+const MAX_AUTHORIZE_FORM_BYTES = 8 * 1024;
 
 export class McpAuthorizationHandler extends WorkerEntrypoint<McpRuntimeEnv> {
   public override async fetch(request: Request): Promise<Response> {
@@ -99,7 +102,15 @@ export class McpAuthorizationHandler extends WorkerEntrypoint<McpRuntimeEnv> {
   }
 
   private async acceptConsent(request: Request): Promise<Response> {
-    const form = await request.formData();
+    let form: URLSearchParams;
+    try {
+      form = await readAuthorizeForm(request);
+    } catch (error) {
+      if (error instanceof ApiProblem) {
+        return new Response(error.message, { status: error.status });
+      }
+      throw error;
+    }
     const flowId = requiredFormString(form, "flow_id");
     const csrf = requiredFormString(form, "csrf_token");
     const action = requiredFormString(form, "action");
@@ -380,12 +391,25 @@ function readCookie(request: Request, name: string): string | null {
   return match?.slice(prefix.length) ?? null;
 }
 
-function requiredFormString(form: FormData, name: string): string {
+function requiredFormString(form: URLSearchParams, name: string): string {
   const value = form.get(name);
   if (typeof value !== "string" || value.length === 0) {
     throw new Error(`Missing form field: ${name}`);
   }
   return value;
+}
+
+export async function readAuthorizeForm(request: Request): Promise<URLSearchParams> {
+  const contentType = request.headers.get("content-type")?.split(";", 1)[0]?.trim()
+    .toLocaleLowerCase("en-US");
+  if (contentType !== "application/x-www-form-urlencoded") {
+    throw new ApiProblem(
+      "INVALID_REQUEST",
+      415,
+      "OAuth consent must use application/x-www-form-urlencoded",
+    );
+  }
+  return new URLSearchParams(await readBoundedText(request, MAX_AUTHORIZE_FORM_BYTES));
 }
 
 function parseJson(value: string | null): unknown {
