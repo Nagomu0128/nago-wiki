@@ -176,6 +176,41 @@ describe("owner administration", () => {
     ).resolves.toMatchObject({ pageId: childPageId, revision: 1 });
   });
 
+  it("bounds and validates route-level admin JSON bodies", async () => {
+    const ownerApp = testApp(owner);
+    const malformed = await ownerApp.request(
+      `https://wiki.example/api/v1/admin/members/${viewer.id}`,
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: "{",
+      },
+      env,
+    );
+    expect(malformed.status).toBe(400);
+    await expect(malformed.json()).resolves.toMatchObject({
+      error: { code: "INVALID_REQUEST" },
+    });
+
+    const oversizedBody = "x".repeat(64 * 1024 + 1);
+    const oversized = await ownerApp.request(
+      `https://wiki.example/api/v1/admin/members/${viewer.id}`,
+      {
+        method: "PATCH",
+        headers: {
+          "content-type": "application/json",
+          "content-length": String(oversizedBody.length),
+        },
+        body: oversizedBody,
+      },
+      env,
+    );
+    expect(oversized.status).toBe(413);
+    await expect(oversized.json()).resolves.toMatchObject({
+      error: { code: "PAYLOAD_TOO_LARGE" },
+    });
+  });
+
   it("manages provider and channel controls with owner-only routes", async () => {
     const ownerApp = testApp(owner);
     const created = await ownerApp.request(

@@ -10,8 +10,11 @@ import {
 import { Hono } from "hono";
 
 import { requireIdentity, type CoreHonoEnv } from "../core/context";
+import { readBoundedText } from "../core/bounded-body";
 import { ApiProblem } from "../core/errors";
 import { AdminService } from "./service";
+
+const MAX_ADMIN_JSON_BYTES = 64 * 1024;
 
 export function createAdminRoutes(): Hono<CoreHonoEnv> {
   const routes = new Hono<CoreHonoEnv>();
@@ -113,8 +116,9 @@ function service(context: { env: Env }): AdminService {
 
 async function readJson(request: Request): Promise<unknown> {
   try {
-    return await request.json();
-  } catch {
+    return JSON.parse(await readBoundedText(request, MAX_ADMIN_JSON_BYTES));
+  } catch (error) {
+    if (error instanceof ApiProblem) throw error;
     return null;
   }
 }
