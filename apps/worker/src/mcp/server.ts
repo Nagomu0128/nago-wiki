@@ -94,7 +94,17 @@ export function createWikiMcpServer(
       }),
     },
     async ({ parentPageId, cursor, limit }) => {
-      const decodedCursor = decodeCursor(cursor);
+      const cursorContext = {
+        userId: auth.userId,
+        workspaceId: auth.workspaceId,
+        collection: "children" as const,
+        targetPageId: parentPageId,
+      };
+      const decodedCursor = await decodeCursor(
+        cursor,
+        environment.TOKEN_ENCRYPTION_KEY,
+        cursorContext,
+      );
       if (cursor !== undefined && decodedCursor === null) {
         return errorResult("Invalid pagination cursor");
       }
@@ -107,7 +117,14 @@ export function createWikiMcpServer(
       );
       return jsonResult({
         pages: children.pages,
-        cursor: children.nextCursor === null ? null : encodeCursor(children.nextCursor),
+        cursor:
+          children.nextCursor === null
+            ? null
+            : await encodeCursor(
+                children.nextCursor,
+                environment.TOKEN_ENCRYPTION_KEY,
+                cursorContext,
+              ),
       });
     },
   );
@@ -124,7 +141,17 @@ export function createWikiMcpServer(
       }),
     },
     async ({ pageId, cursor, limit }) => {
-      const decodedCursor = decodeCursor(cursor);
+      const cursorContext = {
+        userId: auth.userId,
+        workspaceId: auth.workspaceId,
+        collection: "backlinks" as const,
+        targetPageId: pageId,
+      };
+      const decodedCursor = await decodeCursor(
+        cursor,
+        environment.TOKEN_ENCRYPTION_KEY,
+        cursorContext,
+      );
       if (cursor !== undefined && decodedCursor === null) {
         return errorResult("Invalid pagination cursor");
       }
@@ -135,9 +162,19 @@ export function createWikiMcpServer(
         decodedCursor,
         limit,
       );
+      if (backlinks === null) {
+        return errorResult("Page not found or not readable");
+      }
       return jsonResult({
         pages: backlinks.pages,
-        cursor: backlinks.nextCursor === null ? null : encodeCursor(backlinks.nextCursor),
+        cursor:
+          backlinks.nextCursor === null
+            ? null
+            : await encodeCursor(
+                backlinks.nextCursor,
+                environment.TOKEN_ENCRYPTION_KEY,
+                cursorContext,
+              ),
       });
     },
   );

@@ -14,7 +14,6 @@ interface PageSummaryRow {
   id: string;
   workspace_id: string;
   title: string;
-  content_hash: string;
   sort_title: string;
 }
 
@@ -41,12 +40,14 @@ export interface ReadablePageList {
 
 export class McpWikiRepository {
   private readonly authorizer: D1SearchCandidateAuthorizer;
+  private readonly publicOrigin: string;
 
   public constructor(
     private readonly database: D1Database,
     publicOrigin: string,
   ) {
     this.authorizer = new D1SearchCandidateAuthorizer(database, publicOrigin);
+    this.publicOrigin = publicOrigin;
   }
 
   public async getPage(
@@ -119,27 +120,63 @@ export class McpWikiRepository {
     const pageSize = Math.max(1, Math.min(50, limit));
     const rows = await this.database
       .prepare(
-        `SELECT id, workspace_id, title, content_hash, lower(title) AS sort_title
-           FROM pages
-          WHERE workspace_id = ?1
-            AND status = 'active'
-            AND ((?2 IS NULL AND parent_id IS NULL) OR parent_id = ?2)
-            AND (
-              ?3 IS NULL OR lower(title) > ?3
-              OR (lower(title) = ?3 AND id > ?4)
+        `WITH RECURSIVE lineage(page_id, ancestor_id, parent_id, access_mode) AS (
+           SELECT id, id, parent_id, access_mode
+             FROM pages
+            WHERE workspace_id = ?1 AND status = 'active'
+           UNION ALL
+           SELECT lineage.page_id, parent.id, parent.parent_id, parent.access_mode
+             FROM lineage
+             JOIN pages AS parent ON parent.id = lineage.parent_id
+            WHERE parent.workspace_id = ?1 AND parent.status = 'active'
+         ),
+         visible_pages AS (
+           SELECT page.id,
+                  page.workspace_id,
+                  page.title,
+                  lower(page.title) AS sort_title
+             FROM pages AS page
+             JOIN users AS member ON member.id = ?2
+                                 AND member.workspace_id = page.workspace_id
+                                 AND member.status = 'active'
+            WHERE page.workspace_id = ?1
+              AND page.status = 'active'
+              AND ((?3 IS NULL AND page.parent_id IS NULL) OR page.parent_id = ?3)
+              AND (
+                member.role = 'owner' OR NOT EXISTS (
+                  SELECT 1
+                    FROM lineage AS restricted
+                   WHERE restricted.page_id = page.id
+                     AND restricted.access_mode = 'restricted'
+                     AND NOT EXISTS (
+                       SELECT 1
+                         FROM page_acl AS acl
+                        WHERE acl.page_id = restricted.ancestor_id
+                          AND acl.user_id = member.id
+                          AND acl.permission IN ('viewer', 'editor')
+                     )
+                )
+              )
+         )
+         SELECT id, workspace_id, title, sort_title
+           FROM visible_pages
+          WHERE (
+              ?4 IS NULL OR sort_title > ?4
+              OR (sort_title = ?4 AND id > ?5)
             )
-          ORDER BY lower(title) ASC, id ASC
-          LIMIT ?5`,
+          ORDER BY sort_title ASC, id ASC
+          LIMIT ?6`,
       )
       .bind(
         workspaceId,
+        userId,
         parentPageId,
         cursor?.sortTitle ?? null,
         cursor?.id ?? "",
         pageSize + 1,
       )
       .all<PageSummaryRow>();
-    return this.pageSummaries(userId, rows.results, pageSize);
+    return this.pageSummaries(rows.results, pageSize);
   }
 
   public async getBacklinks(
@@ -148,64 +185,94 @@ export class McpWikiRepository {
     targetPageId: string,
     cursor: PageCursor | null = null,
     limit = 50,
-  ): Promise<ReadablePageList> {
+  ): Promise<ReadablePageList | null> {
+    const target = await this.getPage(userId, workspaceId, targetPageId);
+    if (target === null) return null;
+
     const pageSize = Math.max(1, Math.min(50, limit));
     const rows = await this.database
       .prepare(
-        `SELECT source.id,
-                source.workspace_id,
-                source.title,
-                source.content_hash,
-                lower(source.title) AS sort_title
-           FROM page_links AS link
-           JOIN pages AS source ON source.id = link.source_page_id
-          WHERE link.target_page_id = ?1
-            AND source.workspace_id = ?2
-            AND source.status = 'active'
-            AND (
-              ?3 IS NULL OR lower(source.title) > ?3
-              OR (lower(source.title) = ?3 AND source.id > ?4)
+        `WITH RECURSIVE lineage(page_id, ancestor_id, parent_id, access_mode) AS (
+           SELECT id, id, parent_id, access_mode
+             FROM pages
+            WHERE workspace_id = ?1 AND status = 'active'
+           UNION ALL
+           SELECT lineage.page_id, parent.id, parent.parent_id, parent.access_mode
+             FROM lineage
+             JOIN pages AS parent ON parent.id = lineage.parent_id
+            WHERE parent.workspace_id = ?1 AND parent.status = 'active'
+         ),
+         visible_sources AS (
+           SELECT source.id,
+                  source.workspace_id,
+                  source.title,
+                  lower(source.title) AS sort_title
+             FROM pages AS source
+             JOIN users AS member ON member.id = ?2
+                                 AND member.workspace_id = source.workspace_id
+                                 AND member.status = 'active'
+            WHERE source.workspace_id = ?1
+              AND source.status = 'active'
+              AND EXISTS (
+                SELECT 1
+                  FROM page_links AS link
+                 WHERE link.source_page_id = source.id
+                   AND link.target_page_id = ?3
+              )
+              AND (
+                member.role = 'owner' OR NOT EXISTS (
+                  SELECT 1
+                    FROM lineage AS restricted
+                   WHERE restricted.page_id = source.id
+                     AND restricted.access_mode = 'restricted'
+                     AND NOT EXISTS (
+                       SELECT 1
+                         FROM page_acl AS acl
+                        WHERE acl.page_id = restricted.ancestor_id
+                          AND acl.user_id = member.id
+                          AND acl.permission IN ('viewer', 'editor')
+                     )
+                )
+              )
+         )
+         SELECT id, workspace_id, title, sort_title
+           FROM visible_sources
+          WHERE (
+              ?4 IS NULL OR sort_title > ?4
+              OR (sort_title = ?4 AND id > ?5)
             )
-          ORDER BY lower(source.title) ASC, source.id ASC
-          LIMIT ?5`,
+          ORDER BY sort_title ASC, id ASC
+          LIMIT ?6`,
       )
       .bind(
-        targetPageId,
         workspaceId,
+        userId,
+        targetPageId,
         cursor?.sortTitle ?? null,
         cursor?.id ?? "",
         pageSize + 1,
       )
       .all<PageSummaryRow>();
-    return this.pageSummaries(userId, rows.results, pageSize);
+    return this.pageSummaries(rows.results, pageSize);
   }
 
-  private async pageSummaries(
-    userId: string,
+  private pageSummaries(
     rows: PageSummaryRow[],
     pageSize: number,
-  ): Promise<ReadablePageList> {
+  ): ReadablePageList {
     const selectedRows = rows.slice(0, pageSize);
-    const results = await Promise.all(
-      selectedRows.map(async (page) => {
-        const authorized = await this.authorizeRow(userId, {
-          ...page,
-          body_md: "",
-        });
-        return authorized === null
-          ? null
-          : {
-              id: page.id,
-              workspaceId: page.workspace_id,
-              title: page.title,
-              path: authorized.path,
-              url: authorized.url,
-            };
-      }),
-    );
     const last = selectedRows.at(-1);
     return {
-      pages: results.filter((page) => page !== null),
+      pages: selectedRows.map((page) => {
+        const path = `/pages/${encodeURIComponent(page.id)}`;
+        return {
+          id: page.id,
+          workspaceId: page.workspace_id,
+          title: page.title,
+          path,
+          url: new URL(path, this.publicOrigin).toString(),
+        };
+      }),
       nextCursor:
         rows.length > pageSize && last !== undefined
           ? { sortTitle: last.sort_title, id: last.id }

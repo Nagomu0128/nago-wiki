@@ -1,13 +1,25 @@
+import { decryptJson, encryptJson } from "../imports/token-vault";
 import type { PageCursor } from "./repository";
 
-export function decodeCursor(cursor: string | undefined): PageCursor | null {
+export interface PaginationCursorContext {
+  userId: string;
+  workspaceId: string;
+  collection: "children" | "backlinks";
+  targetPageId: string | null;
+}
+
+export async function decodeCursor(
+  cursor: string | undefined,
+  encryptionKey: string,
+  context: PaginationCursorContext,
+): Promise<PageCursor | null> {
   if (cursor === undefined) return null;
   try {
-    const base64 = cursor.replaceAll("-", "+").replaceAll("_", "/");
-    const padded = base64.padEnd(Math.ceil(base64.length / 4) * 4, "=");
-    const binary = atob(padded);
-    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
-    const value: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    const value: unknown = await decryptJson(
+      cursor,
+      encryptionKey,
+      associatedData(context),
+    );
     if (
       typeof value !== "object" ||
       value === null ||
@@ -27,8 +39,20 @@ export function decodeCursor(cursor: string | undefined): PageCursor | null {
   }
 }
 
-export function encodeCursor(cursor: PageCursor): string {
-  const bytes = new TextEncoder().encode(JSON.stringify(cursor));
-  const binary = Array.from(bytes, (byte) => String.fromCharCode(byte)).join("");
-  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/u, "");
+export function encodeCursor(
+  cursor: PageCursor,
+  encryptionKey: string,
+  context: PaginationCursorContext,
+): Promise<string> {
+  return encryptJson(cursor, encryptionKey, associatedData(context));
+}
+
+function associatedData(context: PaginationCursorContext): string {
+  return JSON.stringify([
+    "mcp-pagination-v1",
+    context.userId,
+    context.workspaceId,
+    context.collection,
+    context.targetPageId,
+  ]);
 }
