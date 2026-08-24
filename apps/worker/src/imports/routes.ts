@@ -1,9 +1,22 @@
 import { zValidator } from "@hono/zod-validator";
-import type { AuthenticatedIdentity } from "@nago-wiki/shared";
+import {
+  applyImportRequestSchema,
+  type AuthenticatedIdentity,
+  type CreateImportRequest,
+  type ImportSourceType,
+} from "@nago-wiki/shared";
 import { Hono } from "hono";
+import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 
+import { readBoundedImportJson } from "./body";
+import {
+  createImportSchema,
+  importWorkflowSourceSchema,
+  type ImportWorkflowSource,
+} from "./contracts";
+import { safeImportFilename } from "./filename";
 import {
   exchangeGoogleAuthorizationCode,
   getGoogleAccessToken,
@@ -15,6 +28,7 @@ import {
   type ImportedGoogleAsset,
 } from "./google-inline-images";
 import { createUuidV7 } from "../core/ids";
+import { hashMarkdown } from "../core/markdown";
 import { createRealtimeWikiCoreService } from "../core/realtime-mutations";
 import { TagsService } from "../core/tags-service";
 import type { McpRuntimeEnv } from "../mcp/types";
@@ -40,11 +54,18 @@ interface ImportRow {
   user_id: string;
   source_type: string;
   source_metadata_json: string;
+  workflow_source_json: string | null;
   status: string;
   report_r2_key: string | null;
   created_at: string;
   updated_at: string;
   expires_at: string | null;
+}
+
+interface ImportIdempotencyRow extends Record<string, unknown> {
+  request_hash: string;
+  import_id: string;
+  expires_at: string;
 }
 
 interface ImportApplicationRow extends Record<string, unknown> {
@@ -60,19 +81,14 @@ const googleStateSchema = z.object({
   returnTo: z.url(),
 });
 
-const createImportSchema = z.object({
+const legacyWebCreateImportSchema = z.object({
   source: z.object({
     type: z.literal("google_docs"),
     documentId: z.string().min(1).max(256),
   }),
-});
+}).strict();
 
-const applyImportSchema = z.object({
-  parentId: z.uuid().nullable().optional().default(null),
-  title: z.string().trim().min(1).max(500).optional(),
-  accessMode: z.enum(["workspace", "restricted"]).optional().default("workspace"),
-  acceptedTags: z.array(z.string().trim().min(1).max(100)).max(50).optional().default([]),
-});
+const applyImportSchema = applyImportRequestSchema;
 
 export function createImportRoutes(): Hono<ImportApi> {
   const routes = new Hono<ImportApi>();
@@ -147,68 +163,131 @@ export function createImportRoutes(): Hono<ImportApi> {
     });
   });
 
-  routes.post("/imports", zValidator("json", createImportSchema), async (context) => {
+  routes.post("/imports", async (context) => {
     const identity = requireImportIdentity(context.get("identity"));
     const userId = identity.id;
     await requireEditor(context.env.DB, userId, identity.workspaceId);
-    const vault = new GoogleTokenVault(
-      context.env.OAUTH_KV,
-      context.env.TOKEN_ENCRYPTION_KEY,
+    const request = normalizeCreateImportRequest(
+      await readBoundedImportJson(context.req.raw),
     );
-    if ((await vault.get(userId)) === null) {
-      throw new HTTPException(409, { message: "Connect Google before importing" });
+    const suppliedKey = context.req.header("Idempotency-Key")?.trim();
+    if (suppliedKey !== undefined && (suppliedKey.length === 0 || suppliedKey.length > 200)) {
+      throw new HTTPException(400, {
+        message: "Idempotency-Key must contain between 1 and 200 characters",
+      });
     }
-    const request = context.req.valid("json");
-    const importId = crypto.randomUUID();
-    const targetPageId = createUuidV7();
+    const importId = createUuidV7();
+    // Old Web clients did not send an idempotency header. Keep that payload
+    // working while making every current client request replay-safe.
+    const idempotencyKey = suppliedKey ?? `legacy:${importId}`;
+    const [keyHash, requestHash] = await Promise.all([
+      hashMarkdown(idempotencyKey),
+      hashMarkdown(JSON.stringify(request)),
+    ]);
     const now = new Date().toISOString();
-    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1_000).toISOString();
-    await context.env.DB.prepare(
-      `INSERT INTO imports (
-         id, workspace_id, user_id, source_type, source_metadata_json,
-         status, created_at, updated_at, expires_at
-       ) VALUES (?1, ?2, ?3, 'google_docs', ?4, 'queued', ?5, ?5, ?6)`,
-    )
-      .bind(
-        importId,
-        identity.workspaceId,
-        userId,
-        JSON.stringify({ documentId: request.source.documentId, targetPageId }),
-        now,
-        expiresAt,
+    const existingIdempotency = await getImportIdempotency(
+      context.env.DB,
+      userId,
+      keyHash,
+    );
+    if (existingIdempotency !== null && existingIdempotency.expires_at > now) {
+      return replayImport(context, existingIdempotency, requestHash);
+    }
+    if (existingIdempotency !== null) {
+      await context.env.DB.prepare(
+        `DELETE FROM import_request_idempotency
+          WHERE user_id = ?1 AND key_hash = ?2 AND expires_at <= ?3`,
       )
-      .run();
+        .bind(userId, keyHash, now)
+        .run();
+    }
+    if (request.sourceType === "google_docs") {
+      const vault = new GoogleTokenVault(
+        context.env.OAUTH_KV,
+        context.env.TOKEN_ENCRYPTION_KEY,
+      );
+      if ((await vault.get(userId)) === null) {
+        throw new HTTPException(409, { message: "Connect Google before importing" });
+      }
+    }
+    const targetPageId = createUuidV7();
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1_000).toISOString();
+    const prepared = await prepareImportSource(
+      context.env,
+      identity.workspaceId,
+      importId,
+      request,
+    );
+    const metadata = { ...prepared.metadata, targetPageId };
+    try {
+      await context.env.DB.batch([
+        context.env.DB.prepare(
+          `INSERT INTO imports (
+             id, workspace_id, user_id, source_type, source_metadata_json,
+             workflow_source_json, status, created_at, updated_at, expires_at
+           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'queued', ?7, ?7, ?8)`,
+        ).bind(
+          importId,
+          identity.workspaceId,
+          userId,
+          databaseSourceType(request.sourceType),
+          JSON.stringify(metadata),
+          JSON.stringify(prepared.workflowSource),
+          now,
+          expiresAt,
+        ),
+        context.env.DB.prepare(
+          `INSERT INTO import_request_idempotency (
+             user_id, key_hash, request_hash, import_id, created_at, expires_at
+           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)`,
+        ).bind(
+          userId,
+          keyHash,
+          requestHash,
+          importId,
+          now,
+          new Date(Date.now() + 86_400_000).toISOString(),
+        ),
+      ]);
+    } catch (error) {
+      const raced = await getImportIdempotency(context.env.DB, userId, keyHash);
+      if (raced !== null && raced.expires_at > now) {
+        if (raced.import_id !== importId) {
+          await deletePreparedSource(context.env.FILES, prepared.workflowSource);
+        }
+        return replayImport(context, raced, requestHash);
+      }
+      await deletePreparedSource(context.env.FILES, prepared.workflowSource);
+      throw error;
+    }
 
     const parameters: ImportWorkflowParams = {
       importId,
       workspaceId: identity.workspaceId,
       requestedBy: userId,
       targetPageId,
-      source: request.source,
+      source: prepared.workflowSource,
     };
-    try {
-      await context.env.IMPORT_WORKFLOW.create({
-        id: `import-${importId}`,
-        params: parameters,
-        retention: { successRetention: "7 days", errorRetention: "30 days" },
-      });
-    } catch (error) {
-      await context.env.DB.prepare(
-        `UPDATE imports SET status = 'failed', updated_at = ?2 WHERE id = ?1`,
-      )
-        .bind(importId, new Date().toISOString())
-        .run();
-      throw error;
-    }
+    // The durable queued intent is reconciled if Workflow creation fails or
+    // its response is lost.
+    await createImportWorkflow(context.env.IMPORT_WORKFLOW, parameters).catch(
+      (error: unknown) => {
+        console.error("Deferred import Workflow creation", {
+          importId,
+          error: error instanceof Error ? error.message : "Unknown error",
+        });
+      },
+    );
     return context.json({
       id: importId,
-      sourceType: "google_docs" as const,
-      sourceLabel: request.source.documentId,
+      sourceType: request.sourceType,
+      sourceLabel: sourceLabel(metadata, request.sourceType),
       status: "queued" as const,
       warnings: [],
-      metadata: { documentId: request.source.documentId },
+      metadata,
       createdAt: now,
       updatedAt: now,
+      expiresAt,
     }, 202);
   });
 
@@ -222,7 +301,8 @@ export function createImportRoutes(): Hono<ImportApi> {
     );
     const value = await context.env.DB.prepare(
       `SELECT id, workspace_id, user_id, source_type, source_metadata_json,
-              status, report_r2_key, created_at, updated_at, expires_at
+              workflow_source_json, status, report_r2_key,
+              created_at, updated_at, expires_at
          FROM imports WHERE id = ?1`,
     )
       .bind(context.req.param("id"))
@@ -242,13 +322,13 @@ export function createImportRoutes(): Hono<ImportApi> {
       ? null
       : await readImportReport(context.env.FILES, value.report_r2_key);
     const title = typeof metadata.title === "string" ? metadata.title : undefined;
-    const documentId = typeof metadata.documentId === "string" ? metadata.documentId : "Google Document";
+    const sourceType = publicSourceType(value.source_type);
     const errorMessage = typeof metadata.error === "string" ? metadata.error : undefined;
     return context.json({
       id: value.id,
       workspaceId: value.workspace_id,
-      sourceType: value.source_type,
-      sourceLabel: title ?? documentId,
+      sourceType,
+      sourceLabel: title ?? sourceLabel(metadata, sourceType),
       status: value.status,
       metadata,
       previewMarkdown: preview === null ? null : await preview.text(),
@@ -273,7 +353,8 @@ export function createImportRoutes(): Hono<ImportApi> {
       const importId = context.req.param("id");
       const value = await context.env.DB.prepare(
         `SELECT id, workspace_id, user_id, source_type, source_metadata_json,
-                status, report_r2_key, created_at, updated_at, expires_at
+                workflow_source_json, status, report_r2_key,
+                created_at, updated_at, expires_at
            FROM imports WHERE id = ?1`,
       )
         .bind(importId)
@@ -403,6 +484,404 @@ export function createImportRoutes(): Hono<ImportApi> {
   );
 
   return routes;
+}
+
+function normalizeCreateImportRequest(value: unknown): CreateImportRequest {
+  const canonical = createImportSchema.safeParse(value);
+  if (canonical.success) return canonical.data;
+  const legacy = legacyWebCreateImportSchema.safeParse(value);
+  if (legacy.success) {
+    return {
+      sourceType: "google_docs",
+      documentId: legacy.data.source.documentId,
+    };
+  }
+  throw new HTTPException(400, { message: "Invalid import request" });
+}
+
+async function getImportIdempotency(
+  database: D1Database,
+  userId: string,
+  keyHash: string,
+): Promise<ImportIdempotencyRow | null> {
+  return database
+    .prepare(
+      `SELECT request_hash, import_id, expires_at
+         FROM import_request_idempotency
+        WHERE user_id = ?1 AND key_hash = ?2`,
+    )
+    .bind(userId, keyHash)
+    .first<ImportIdempotencyRow>();
+}
+
+async function replayImport(
+  context: Context<ImportApi>,
+  idempotency: ImportIdempotencyRow,
+  requestHash: string,
+): Promise<Response> {
+  if (idempotency.request_hash !== requestHash) {
+    throw new HTTPException(409, {
+      message: "This idempotency key was used with a different import request",
+    });
+  }
+  const identity = requireImportIdentity(context.get("identity"));
+  const row = await context.env.DB.prepare(
+    `SELECT id, workspace_id, user_id, source_type, source_metadata_json,
+            workflow_source_json, status, report_r2_key,
+            created_at, updated_at, expires_at
+       FROM imports WHERE id = ?1`,
+  )
+    .bind(idempotency.import_id)
+    .first<ImportRow>();
+  if (
+    row?.user_id !== identity.id ||
+    row.workspace_id !== identity.workspaceId
+  ) {
+    throw new HTTPException(409, {
+      message: "This idempotency key belongs to another import",
+    });
+  }
+  await resumeImportWorkflow(context.env, row);
+  const metadata = z.record(z.string(), z.unknown()).catch({}).parse(
+    parseJson(row.source_metadata_json),
+  );
+  return context.json(
+    await importJobResponse(context.env.FILES, row, metadata),
+    200,
+  );
+}
+
+async function createImportWorkflow(
+  workflow: Workflow<ImportWorkflowParams>,
+  parameters: ImportWorkflowParams,
+): Promise<void> {
+  await workflow.create({
+    id: `import-${parameters.importId}`,
+    params: parameters,
+    retention: { successRetention: "7 days", errorRetention: "30 days" },
+  });
+}
+
+async function resumeImportWorkflow(
+  environment: McpRuntimeEnv,
+  row: ImportRow,
+): Promise<void> {
+  if (row.status !== "queued" && row.status !== "running") return;
+  const parameters = importWorkflowParameters(row);
+  if (parameters === null) {
+    throw new HTTPException(409, { message: "Import workflow cannot be resumed" });
+  }
+  const instance = await environment.IMPORT_WORKFLOW.get(`import-${row.id}`);
+  const state = await instance.status();
+  if (state.status === "unknown") {
+    try {
+      await createImportWorkflow(environment.IMPORT_WORKFLOW, parameters);
+    } catch (error) {
+      const raced = await (
+        await environment.IMPORT_WORKFLOW.get(`import-${row.id}`)
+      ).status();
+      if (raced.status === "unknown") throw error;
+    }
+    return;
+  }
+  if (state.status === "errored" || state.status === "terminated") {
+    await instance.restart();
+  }
+}
+
+function importWorkflowParameters(row: ImportRow): ImportWorkflowParams | null {
+  const metadata = z.record(z.string(), z.unknown()).catch({}).parse(
+    parseJson(row.source_metadata_json),
+  );
+  const targetPageId =
+    typeof metadata.targetPageId === "string" ? metadata.targetPageId : null;
+  if (targetPageId === null) return null;
+  let source = importWorkflowSourceSchema.safeParse(
+    parseJson(row.workflow_source_json),
+  );
+  // Rows created by the pre-portable Google endpoint did not persist the
+  // Workflow payload separately. Reconstruct that durable intent in place.
+  if (!source.success && row.source_type === "google_docs") {
+    source = importWorkflowSourceSchema.safeParse({
+      type: "google_docs",
+      documentId: metadata.documentId,
+    });
+  }
+  if (!source.success) return null;
+  return {
+    importId: row.id,
+    workspaceId: row.workspace_id,
+    requestedBy: row.user_id,
+    targetPageId,
+    source: source.data,
+  };
+}
+
+export async function reconcileQueuedImports(
+  environment: McpRuntimeEnv,
+  now = new Date(),
+): Promise<{ resumed: number; failed: number }> {
+  const cutoff = new Date(now.getTime() - 5 * 60_000).toISOString();
+  const rows = await environment.DB.prepare(
+    `SELECT id, workspace_id, user_id, source_type, source_metadata_json,
+            workflow_source_json, status, report_r2_key,
+            created_at, updated_at, expires_at
+       FROM imports
+      WHERE status IN ('queued', 'running') AND updated_at <= ?1
+      ORDER BY updated_at, id
+      LIMIT 100`,
+  )
+    .bind(cutoff)
+    .all<ImportRow>();
+  let resumed = 0;
+  let failed = 0;
+  for (const row of rows.results) {
+    if (importWorkflowParameters(row) === null) {
+      const failedAt = now.toISOString();
+      await environment.DB.prepare(
+        `UPDATE imports
+            SET status = 'failed',
+                source_metadata_json = json_set(
+                  source_metadata_json,
+                  '$.error',
+                  'Import workflow cannot be resumed after migration'
+                ),
+                updated_at = ?2, expires_at = ?3
+          WHERE id = ?1 AND status IN ('queued', 'running')`,
+      )
+        .bind(
+          row.id,
+          failedAt,
+          new Date(now.getTime() + 7 * 24 * 60 * 60 * 1_000).toISOString(),
+        )
+        .run();
+      failed += 1;
+      continue;
+    }
+    try {
+      await resumeImportWorkflow(environment, row);
+      await environment.DB.prepare(
+        `UPDATE imports SET updated_at = ?2
+          WHERE id = ?1 AND status IN ('queued', 'running')`,
+      )
+        .bind(row.id, now.toISOString())
+        .run();
+      resumed += 1;
+    } catch (error) {
+      failed += 1;
+      await environment.DB.prepare(
+        `UPDATE imports SET updated_at = ?2
+          WHERE id = ?1 AND status IN ('queued', 'running')`,
+      )
+        .bind(row.id, now.toISOString())
+        .run();
+      console.error("Failed to reconcile queued import", {
+        importId: row.id,
+        error: error instanceof Error ? error.message : "Unknown error",
+      });
+    }
+  }
+  return { resumed, failed };
+}
+
+async function importJobResponse(
+  bucket: R2Bucket,
+  row: ImportRow,
+  metadata: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const previewKey =
+    typeof metadata.previewKey === "string" ? metadata.previewKey : null;
+  const preview = previewKey === null ? null : await bucket.get(previewKey);
+  const report =
+    row.report_r2_key === null
+      ? null
+      : await readImportReport(bucket, row.report_r2_key);
+  const title = typeof metadata.title === "string" ? metadata.title : undefined;
+  const errorMessage =
+    typeof metadata.error === "string" ? metadata.error : undefined;
+  const sourceType = publicSourceType(row.source_type);
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    sourceType,
+    sourceLabel: title ?? sourceLabel(metadata, sourceType),
+    status: row.status,
+    metadata,
+    previewMarkdown:
+      preview === null || preview.size > 1_048_576 ? null : await preview.text(),
+    warnings: report?.warnings ?? [],
+    ...(title === undefined ? {} : { suggestedTitle: title }),
+    ...(errorMessage === undefined
+      ? {}
+      : { error: { code: "IMPORT_FAILED", message: errorMessage } }),
+    reportKey: row.report_r2_key,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    expiresAt: row.expires_at,
+  };
+}
+
+function publicSourceType(value: string): ImportSourceType {
+  if (value === "public_url") return "url";
+  if (
+    value === "google_docs" ||
+    value === "markdown" ||
+    value === "pdf" ||
+    value === "paste"
+  ) {
+    return value;
+  }
+  throw new Error("Import source type is invalid");
+}
+
+function databaseSourceType(value: ImportSourceType): string {
+  return value === "url" ? "public_url" : value;
+}
+
+function sourceLabel(
+  metadata: Record<string, unknown>,
+  sourceType: ImportSourceType,
+): string {
+  if (typeof metadata.title === "string") return metadata.title;
+  if (typeof metadata.filename === "string") return metadata.filename;
+  if (typeof metadata.sourceUrl === "string") return metadata.sourceUrl;
+  if (typeof metadata.documentId === "string") {
+    return `Google Document: ${metadata.documentId}`;
+  }
+  return sourceType === "google_docs" ? "Google Document" : "Imported Document";
+}
+
+async function prepareImportSource(
+  environment: McpRuntimeEnv,
+  workspaceId: string,
+  importId: string,
+  request: CreateImportRequest,
+): Promise<{
+  metadata: Record<string, string>;
+  workflowSource: ImportWorkflowSource;
+}> {
+  if (request.sourceType === "google_docs") {
+    return {
+      metadata: { documentId: request.documentId },
+      workflowSource: { type: "google_docs", documentId: request.documentId },
+    };
+  }
+  if (request.sourceType === "url") {
+    return {
+      metadata: { sourceUrl: request.sourceUrl },
+      workflowSource: { type: "public_url", sourceUrl: request.sourceUrl },
+    };
+  }
+  const prepared =
+    request.sourceType === "pdf"
+      ? preparePdf(request.content, request.filename)
+      : prepareTextSource(request.content, request.sourceType, request.filename);
+  const sourceKey = `imports/${workspaceId}/${importId}/source/${prepared.filename}`;
+  await environment.FILES.put(sourceKey, prepared.bytes, {
+    httpMetadata: { contentType: prepared.contentType },
+    customMetadata: {
+      import_id: importId,
+      source_type: request.sourceType,
+    },
+  });
+  return {
+    metadata: { filename: prepared.filename, sourceKey },
+    workflowSource: {
+      type: request.sourceType,
+      sourceKey,
+      filename: prepared.filename,
+      contentType: prepared.contentType,
+    },
+  };
+}
+
+function prepareTextSource(
+  content: string,
+  sourceType: "markdown" | "paste",
+  filename: string | undefined,
+): { bytes: Uint8Array; filename: string; contentType: string } {
+  const bytes = new TextEncoder().encode(content);
+  const limit = sourceType === "markdown" ? 1_048_576 : 5 * 1024 * 1024;
+  if (bytes.byteLength > limit) {
+    throw new HTTPException(413, { message: "Import content is too large" });
+  }
+  const html = sourceType === "paste" && looksLikeHtml(content, filename);
+  return {
+    bytes,
+    filename: safeImportFilename(
+      filename ?? (html ? "pasted-content.html" : "pasted-content.txt"),
+    ),
+    contentType: html
+      ? "text/html; charset=utf-8"
+      : sourceType === "markdown"
+        ? "text/markdown; charset=utf-8"
+        : "text/plain; charset=utf-8",
+  };
+}
+
+function preparePdf(
+  content: string,
+  filename: string,
+): { bytes: Uint8Array; filename: string; contentType: string } {
+  const payload = content
+    .replace(/^data:application\/pdf;base64,/iu, "")
+    .replaceAll(/\s/gu, "");
+  if (!/^[A-Za-z\d+/]*={0,2}$/u.test(payload) || payload.length % 4 !== 0) {
+    throw new HTTPException(400, { message: "PDF content must be valid base64" });
+  }
+  const padding = payload.endsWith("==") ? 2 : payload.endsWith("=") ? 1 : 0;
+  const decodedSize = (payload.length / 4) * 3 - padding;
+  if (decodedSize > 20 * 1024 * 1024) {
+    throw new HTTPException(413, { message: "PDF exceeds the 20 MiB import limit" });
+  }
+  const bytes = decodeBase64(payload, decodedSize);
+  if (new TextDecoder().decode(bytes.subarray(0, 5)) !== "%PDF-") {
+    throw new HTTPException(400, { message: "PDF content has an invalid signature" });
+  }
+  const normalizedFilename = safeImportFilename(filename);
+  return {
+    bytes,
+    filename: normalizedFilename.toLowerCase().endsWith(".pdf")
+      ? normalizedFilename
+      : `${normalizedFilename}.pdf`,
+    contentType: "application/pdf",
+  };
+}
+
+function decodeBase64(payload: string, decodedSize: number): Uint8Array {
+  const output = new Uint8Array(decodedSize);
+  let outputOffset = 0;
+  try {
+    for (let offset = 0; offset < payload.length; offset += 32_768) {
+      const decoded = atob(payload.slice(offset, offset + 32_768));
+      for (let index = 0; index < decoded.length; index += 1) {
+        output[outputOffset] = decoded.charCodeAt(index);
+        outputOffset += 1;
+      }
+    }
+  } catch {
+    throw new HTTPException(400, { message: "PDF content must be valid base64" });
+  }
+  if (outputOffset !== decodedSize) {
+    throw new HTTPException(400, { message: "PDF content must be valid base64" });
+  }
+  return output;
+}
+
+function looksLikeHtml(content: string, filename: string | undefined): boolean {
+  return (
+    filename?.toLowerCase().endsWith(".html") === true ||
+    /<\s*(?:!doctype|html|head|body|article|main|p|div|h[1-6]|ul|ol|table|a)\b/iu.test(
+      content,
+    )
+  );
+}
+
+async function deletePreparedSource(
+  bucket: R2Bucket,
+  source: ImportWorkflowSource,
+): Promise<void> {
+  if ("sourceKey" in source) await bucket.delete(source.sourceKey);
 }
 
 async function getImportApplication(

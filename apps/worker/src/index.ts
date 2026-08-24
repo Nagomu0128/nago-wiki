@@ -25,8 +25,11 @@ import {
   runWeeklyBackupMaintenance,
   WEEKLY_BACKUP_CRON,
 } from "./exports/service";
-import { createImportRoutes } from "./imports/routes";
-import { cleanupExpiredImports } from "./imports/cleanup";
+import { createImportRoutes, reconcileQueuedImports } from "./imports/routes";
+import {
+  cleanupExpiredImports,
+  cleanupOrphanedImportArtifacts,
+} from "./imports/cleanup";
 import { createMcpOAuthProvider } from "./mcp/oauth";
 import { isMcpOAuthPath } from "./mcp/security";
 import type { McpRuntimeEnv } from "./mcp/types";
@@ -133,6 +136,10 @@ export default {
         name: "export Workflow reconciliation",
         promise: reconcileQueuedPortableExports(environment),
       },
+      {
+        name: "import Workflow reconciliation",
+        promise: reconcileQueuedImports(environment),
+      },
       { name: "expired import cleanup", promise: cleanupExpiredImports(environment) },
       {
         name: "Discord gateway",
@@ -148,6 +155,10 @@ export default {
       tasks.push({
         name: "portable export cleanup",
         promise: cleanupExpiredPortableExports(environment),
+      });
+      tasks.push({
+        name: "orphaned import artifact cleanup",
+        promise: cleanupOrphanedImportArtifacts(environment),
       });
     }
     context.waitUntil(
