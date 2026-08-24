@@ -32,7 +32,13 @@ describe("bot account links", () => {
   it("audits successful link and unlink changes without exposing the subject", async () => {
     const issued = await issueAccountLinkCode(env.DB, userId, "discord");
     await expect(
-      consumeAccountLinkCode(env.DB, "discord", "discord-user-123456", issued.code),
+      consumeAccountLinkCode(
+        env.DB,
+        "discord",
+        "discord-user-123456",
+        issued.code,
+        DEFAULT_WORKSPACE_ID,
+      ),
     ).resolves.toBe(true);
 
     const accounts = await listLinkedBotAccounts(env.DB, userId);
@@ -54,5 +60,35 @@ describe("bot account links", () => {
     expect(audit.results.map((event) => event.metadata_json).join(" ")).not.toContain(
       "discord-user-123456",
     );
+  });
+
+  it("does not link a suspended member or a code in another workspace", async () => {
+    const suspended = await issueAccountLinkCode(env.DB, userId, "discord");
+    await env.DB.prepare(`UPDATE users SET status = 'suspended' WHERE id = ?1`)
+      .bind(userId)
+      .run();
+    await expect(
+      consumeAccountLinkCode(
+        env.DB,
+        "discord",
+        "discord-user-suspended",
+        suspended.code,
+        DEFAULT_WORKSPACE_ID,
+      ),
+    ).resolves.toBe(false);
+
+    await env.DB.prepare(`UPDATE users SET status = 'active' WHERE id = ?1`)
+      .bind(userId)
+      .run();
+    const crossWorkspace = await issueAccountLinkCode(env.DB, userId, "discord");
+    await expect(
+      consumeAccountLinkCode(
+        env.DB,
+        "discord",
+        "discord-user-other-workspace",
+        crossWorkspace.code,
+        "00000000-0000-7000-8000-000000000099",
+      ),
+    ).resolves.toBe(false);
   });
 });

@@ -211,7 +211,7 @@ export class AdminService {
     request: ReplacePageAclRequest,
   ): Promise<PageAclResponse> {
     const page = await this.requireRestrictedPageOwner(identity, pageId);
-    await this.validateAclMembers(identity.workspaceId, request);
+    await this.validateAclMembers(identity.workspaceId, pageId, request);
     const now = new Date().toISOString();
     const mutationId = crypto.randomUUID();
     const statements: D1PreparedStatement[] = [
@@ -535,6 +535,7 @@ export class AdminService {
 
   private async validateAclMembers(
     workspaceId: string,
+    pageId: string,
     request: ReplacePageAclRequest,
   ): Promise<void> {
     if (request.entries.length === 0) return;
@@ -560,6 +561,57 @@ export class AdminService {
         "INVALID_REQUEST",
         400,
         "ACL entries must reference active members without exceeding their workspace role",
+      );
+    }
+    await this.validateInheritedAclBoundary(workspaceId, pageId, request.entries);
+  }
+
+  private async validateInheritedAclBoundary(
+    workspaceId: string,
+    pageId: string,
+    entries: ReplacePageAclRequest["entries"],
+  ): Promise<void> {
+    if (entries.length === 0) return;
+    const ancestors = await this.database
+      .prepare(
+        `WITH RECURSIVE ancestors(id, parent_id, access_mode) AS (
+           SELECT id, parent_id, access_mode
+             FROM pages
+            WHERE id = ?1 AND workspace_id = ?2 AND status = 'active'
+           UNION ALL
+           SELECT parent.id, parent.parent_id, parent.access_mode
+             FROM pages AS parent
+             JOIN ancestors ON ancestors.parent_id = parent.id
+            WHERE parent.workspace_id = ?2 AND parent.status = 'active'
+         )
+         SELECT id FROM ancestors WHERE id <> ?1 AND access_mode = 'restricted'`,
+      )
+      .bind(pageId, workspaceId)
+      .all<{ id: string }>();
+    if (ancestors.results.length === 0) return;
+
+    const ancestorIds = ancestors.results.map((ancestor) => ancestor.id);
+    const ancestorPlaceholders = ancestorIds.map((_id, index) => `?${String(index + 1)}`).join(", ");
+    const userPlaceholders = entries.map((_entry, index) => `?${String(index + ancestorIds.length + 1)}`).join(", ");
+    const grants = await this.database
+      .prepare(
+        `SELECT page_id, user_id FROM page_acl
+          WHERE page_id IN (${ancestorPlaceholders})
+            AND user_id IN (${userPlaceholders})`,
+      )
+      .bind(...ancestorIds, ...entries.map((entry) => entry.userId))
+      .all<{ page_id: string; user_id: string }>();
+    const grantsByUser = new Map<string, Set<string>>();
+    for (const grant of grants.results) {
+      const userGrants = grantsByUser.get(grant.user_id) ?? new Set<string>();
+      userGrants.add(grant.page_id);
+      grantsByUser.set(grant.user_id, userGrants);
+    }
+    if (entries.some((entry) => grantsByUser.get(entry.userId)?.size !== ancestorIds.length)) {
+      throw new ApiProblem(
+        "INVALID_REQUEST",
+        400,
+        "ACL entries cannot grant access beyond a restricted ancestor",
       );
     }
   }

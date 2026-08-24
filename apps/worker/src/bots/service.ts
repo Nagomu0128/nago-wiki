@@ -66,6 +66,15 @@ export async function answerBotQuery(
   environment: McpRuntimeEnv,
   input: BotQueryInput,
 ): Promise<string | null> {
+  const workspaceId = await resolveWorkspace(
+    environment.DB,
+    input.provider,
+    input.externalChannelId,
+  );
+  if (workspaceId === null) {
+    await ignoreDisabledBotEvent(environment.DB, input);
+    return null;
+  }
   const replay = await environment.DB.prepare(
     `SELECT status, response_text FROM bot_events
       WHERE provider = ?1 AND event_id = ?2`,
@@ -86,23 +95,6 @@ export async function answerBotQuery(
     throw new BotEventInProgressError();
   }
 
-  const workspaceId = await resolveWorkspace(
-    environment.DB,
-    input.provider,
-    input.externalChannelId,
-  );
-  if (workspaceId === null) {
-    await finishEvent(
-      environment.DB,
-      input,
-      processingToken,
-      null,
-      "ignored",
-      null,
-    );
-    return null;
-  }
-
   const linkCode = parseLinkCode(input.query);
   if (linkCode !== null) {
     const linked = await consumeAccountLinkCode(
@@ -110,6 +102,7 @@ export async function answerBotQuery(
       input.provider,
       input.externalUserId,
       linkCode,
+      workspaceId,
     );
     const response = linked
       ? "Wikiアカウントとの連携が完了しました。"
@@ -190,6 +183,23 @@ export async function answerBotQuery(
       pageIds: result.citations.map((citation) => citation.pageId),
       answerSummary: result.answer,
     });
+    if (
+      await resolveWorkspace(
+        environment.DB,
+        input.provider,
+        input.externalChannelId,
+      ) !== workspaceId
+    ) {
+      await finishEvent(
+        environment.DB,
+        input,
+        processingToken,
+        userId,
+        "ignored",
+        null,
+      );
+      return null;
+    }
     const response = formatBotAnswer(result.answer, result.citations);
     await finishEvent(
       environment.DB,
@@ -211,6 +221,21 @@ export async function answerBotQuery(
     );
     throw error;
   }
+}
+
+async function ignoreDisabledBotEvent(
+  database: D1Database,
+  input: Pick<BotQueryInput, "provider" | "eventId">,
+): Promise<void> {
+  await database
+    .prepare(
+      `UPDATE bot_events
+          SET status = 'ignored', response_hash = NULL, response_text = NULL,
+              processing_token = NULL, processing_expires_at = NULL, updated_at = ?3
+        WHERE provider = ?1 AND event_id = ?2 AND status IN ('received', 'failed')`,
+    )
+    .bind(input.provider, input.eventId, new Date().toISOString())
+    .run();
 }
 
 export async function consumeBotRateLimit(
