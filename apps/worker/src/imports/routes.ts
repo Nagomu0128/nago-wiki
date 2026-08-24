@@ -531,7 +531,7 @@ export async function reconcileQueuedImports(
             created_at, updated_at, expires_at
        FROM imports
       WHERE status IN ('queued', 'running') AND updated_at <= ?1
-      ORDER BY CASE status WHEN 'queued' THEN 0 ELSE 1 END, updated_at, id
+      ORDER BY updated_at, id
       LIMIT 100`,
   )
     .bind(cutoff)
@@ -637,11 +637,21 @@ export async function cleanupOrphanedImportArtifacts(
   let removed = 0;
   for (let page = 0; page < MAX_ORPHAN_SCAN_PAGES_PER_RUN; page += 1) {
     const pageCursor = cursor;
-    const listing = await environment.FILES.list({
-      prefix: "imports/",
-      limit: 1_000,
-      ...(cursor === undefined ? {} : { cursor }),
-    });
+    let listing: R2Objects;
+    try {
+      listing = await environment.FILES.list({
+        prefix: "imports/",
+        limit: 1_000,
+        ...(cursor === undefined ? {} : { cursor }),
+      });
+    } catch (error) {
+      // R2 cursors are opaque and may be invalidated by retention/deletion.
+      // Reset once rather than making the scheduled maintenance permanently fail.
+      if (cursor === undefined) throw error;
+      cursor = undefined;
+      await storeMaintenanceCursor(environment.DB, undefined, now);
+      continue;
+    }
     const candidates = new Map<
       string,
       { workspaceId: string; importId: string }

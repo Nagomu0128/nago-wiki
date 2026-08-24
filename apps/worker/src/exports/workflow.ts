@@ -1703,18 +1703,34 @@ async function sha256Bytes(value: Uint8Array): Promise<string> {
   return bytesToHex(new Uint8Array(digest));
 }
 
-function safeAssetFilename(value: string): string {
-  const withoutSeparators = value.normalize("NFKC").replaceAll(/[/\\]/gu, "_");
+export function safeAssetFilename(value: string): string {
+  const withoutSeparators = value.normalize("NFKC").replaceAll(/[/\\:]/gu, "_");
   const normalized = Array.from(withoutSeparators, (character) => {
     const codePoint = character.codePointAt(0) ?? 0;
-    return codePoint <= 0x1f || codePoint === 0x7f ? "_" : character;
+    return codePoint <= 0x1f || codePoint === 0x7f || /[<>"|?*]/u.test(character)
+      ? "_"
+      : character;
   })
     .join("")
+    .replace(/[. ]+$/u, "")
     .trim();
-  if (normalized.length === 0 || normalized === "." || normalized === "..") {
+  const stem = normalized.split(".")[0]?.toUpperCase();
+  if (
+    normalized.length === 0 ||
+    normalized === "." ||
+    normalized === ".." ||
+    stem === "CON" || stem === "PRN" || stem === "AUX" || stem === "NUL" ||
+    /^(COM|LPT)[1-9]$/u.test(stem ?? "")
+  ) {
     return "asset";
   }
-  return normalized.slice(0, 200);
+  const bytes = new TextEncoder();
+  let result = "";
+  for (const character of normalized) {
+    if (bytes.encode(result + character).byteLength > 200) break;
+    result += character;
+  }
+  return result || "asset";
 }
 
 function nonEmpty(value: string | undefined): string | null {

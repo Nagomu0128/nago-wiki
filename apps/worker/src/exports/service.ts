@@ -142,7 +142,7 @@ export async function reconcileQueuedPortableExports(
             backup_date, status
        FROM exports
       WHERE status IN ('queued', 'running') AND updated_at <= ?1
-      ORDER BY CASE status WHEN 'queued' THEN 0 ELSE 1 END, updated_at, id
+      ORDER BY updated_at, id
       LIMIT 100`,
   )
     .bind(cutoff)

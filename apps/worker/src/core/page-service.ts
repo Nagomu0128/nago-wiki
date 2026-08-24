@@ -267,7 +267,12 @@ export class D1WikiCoreService implements WikiCoreService {
         userId: identity.id,
         keyHash,
         requestHash,
-        expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+        // Import application retries must survive for the complete preview
+        // lifetime: a lost response happens after the page transaction.
+        expiresAt: new Date(
+          Date.now() +
+            (idempotencyKey.startsWith("import:") ? 8 * 86_400_000 : 86_400_000),
+        ).toISOString(),
       };
     }
     const now = new Date().toISOString();
