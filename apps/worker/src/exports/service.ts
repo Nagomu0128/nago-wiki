@@ -10,7 +10,8 @@ import type { McpRuntimeEnv } from "../mcp/types";
 
 export const WEEKLY_BACKUP_CRON = "0 18 * * 6";
 export const PORTABLE_EXPORT_CLEANUP_CRON = "0 19 * * *";
-const MAX_CLEANUP_EXPORTS_PER_RUN = 2_000;
+const MAX_CLEANUP_EXPORTS_PER_RUN = 100;
+const MAX_CLEANUP_OBJECTS_PER_RUN = 8_000;
 
 export interface StartPortableExportInput {
   workspaceId: string;
@@ -242,6 +243,7 @@ export async function cleanupExpiredPortableExports(
   now = new Date().toISOString(),
 ): Promise<number> {
   let cleaned = 0;
+  let removedObjects = 0;
   while (cleaned < MAX_CLEANUP_EXPORTS_PER_RUN) {
     const limit = Math.min(100, MAX_CLEANUP_EXPORTS_PER_RUN - cleaned);
     const rows = await environment.DB.prepare(
@@ -256,7 +258,7 @@ export async function cleanupExpiredPortableExports(
       .all<ExpiredExportRow>();
     if (rows.results.length === 0) break;
     for (const row of rows.results) {
-      await deleteR2Prefix(
+      const deletion = await deleteR2Prefix(
         environment.FILES,
         exportArtifactPrefix({
           exportId: row.id,
@@ -264,7 +266,10 @@ export async function cleanupExpiredPortableExports(
           purpose: row.purpose,
           backupDate: row.backup_date,
         }),
+        MAX_CLEANUP_OBJECTS_PER_RUN - removedObjects,
       );
+      removedObjects += deletion.removed;
+      if (!deletion.complete) return cleaned;
       await environment.DB.prepare(
         `UPDATE exports
             SET status = 'cancelled', r2_key = NULL, plan_r2_key = NULL,
@@ -274,6 +279,7 @@ export async function cleanupExpiredPortableExports(
         .bind(row.id, now)
         .run();
       cleaned += 1;
+      if (removedObjects >= MAX_CLEANUP_OBJECTS_PER_RUN) return cleaned;
     }
     if (rows.results.length < limit) break;
   }
@@ -369,12 +375,23 @@ function japanDate(value: Date): string {
   return z.iso.date().parse(`${get("year")}-${get("month")}-${get("day")}`);
 }
 
-async function deleteR2Prefix(bucket: R2Bucket, prefix: string): Promise<void> {
+async function deleteR2Prefix(
+  bucket: R2Bucket,
+  prefix: string,
+  maxObjects: number,
+): Promise<{ removed: number; complete: boolean }> {
+  let removed = 0;
   let objects: R2Objects;
   do {
-    objects = await bucket.list({ prefix, limit: 1_000 });
+    if (removed >= maxObjects) return { removed, complete: false };
+    objects = await bucket.list({
+      prefix,
+      limit: Math.min(1_000, maxObjects - removed),
+    });
     if (objects.objects.length > 0) {
       await bucket.delete(objects.objects.map((object) => object.key));
+      removed += objects.objects.length;
     }
   } while (objects.truncated || objects.objects.length > 0);
+  return { removed, complete: true };
 }

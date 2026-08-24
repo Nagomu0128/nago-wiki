@@ -135,8 +135,17 @@
           "name": "nago-wiki-import-prod",
           "binding": "IMPORT_WORKFLOW",
           "class_name": "ImportWorkflow"
+        },
+        {
+          "name": "nago-wiki-export-prod",
+          "binding": "EXPORT_WORKFLOW",
+          "class_name": "ExportWorkflow",
+          "limits": { "steps": 25000 }
         }
       ],
+      "triggers": {
+        "crons": ["*/1 * * * *", "0 18 * * 6", "0 19 * * *"]
+      },
       "durable_objects": {
         "bindings": [
           { "name": "PAGE_ROOM", "class_name": "PageRoom" },

@@ -48,3 +48,5 @@ rather than producing a mixed-generation archive.
 - Interactive download exports are retained for 7 days.
 - Expired jobs retain their D1/audit record as `cancelled`, while the archive,
   plan, and any staged segments are deleted from R2.
+- Workspace and requesting-user deletion is restricted while export rows exist,
+  so R2 cleanup never loses the durable prefix needed to find its artifacts.

@@ -42,12 +42,15 @@ import type { McpRuntimeEnv } from "../mcp/types";
 const encoder = new TextEncoder();
 const TARGET_PART_BYTES = 5 * 1024 * 1024;
 const MAX_ENTRIES_PER_STAGE = 400;
-const MAX_EXPORT_MULTIPART_PARTS = 8_000;
+const MAX_EXPORT_MULTIPART_PARTS = 4_000;
 const MAX_EXPORT_OBJECT_BYTES = 256 * 1024 * 1024;
 const MAX_EXPORT_ARCHIVE_BYTES = 32 * 1024 * 1024 * 1024;
 const MAX_EXPORT_PLAN_BYTES = 8 * 1024 * 1024;
 const MAX_EXPORT_WORKFLOW_STEPS = 25_000;
 const MAX_EXPORT_SNAPSHOT_CAPTURE_ATTEMPTS = 3;
+const MAX_EXPORT_IO_SUBREQUESTS = 9_000;
+const MAX_EXPORT_METADATA_ITEMS = 50_000;
+const MAX_EXPORT_METADATA_BYTES = 6 * 1024 * 1024;
 
 export const exportWorkflowParamsSchema = z
   .object({
@@ -522,6 +525,13 @@ async function createAndStorePlan(
       "Export archive exceeds the supported Workflow multipart capacity",
     );
   }
+  const estimatedIoSubrequests =
+    zip.entries.length + multipart.parts.length * 2 + groups.length + 100;
+  if (estimatedIoSubrequests > MAX_EXPORT_IO_SUBREQUESTS) {
+    throw new Error(
+      "Export archive requires too many storage operations for one Workflow invocation",
+    );
+  }
   if (groups.length + multipart.parts.length + 12 > MAX_EXPORT_WORKFLOW_STEPS) {
     throw new Error("Export archive requires too many workflow steps");
   }
@@ -585,31 +595,33 @@ async function collectExportMetadata(
   environment: Pick<McpRuntimeEnv, "DB" | "FILES">,
   workspaceId: string,
 ) {
-  const [
-    workspaceName,
-    members,
-    pages,
-    versions,
-    assets,
-    acl,
-    tags,
-    pageTags,
-    links,
-    aliases,
-    comments,
-  ] = await Promise.all([
-    getExportWorkspaceName(environment.DB, workspaceId),
-    listExportMembers(environment.DB, workspaceId),
-    listExportPages(environment.DB, workspaceId),
-    listExportVersions(environment.DB, environment.FILES, workspaceId),
-    listExportAssets(environment.FILES, workspaceId),
-    listExportAcl(environment.DB, workspaceId),
-    listExportTags(environment.DB, workspaceId),
-    listExportPageTags(environment.DB, workspaceId),
-    listExportLinks(environment.DB, workspaceId),
-    listExportAliases(environment.DB, workspaceId),
-    listExportComments(environment.DB, workspaceId),
-  ]);
+  const budget = { items: 0, bytes: 0 };
+  const workspaceName = await getExportWorkspaceName(environment.DB, workspaceId);
+  addMetadataBatch(budget, [workspaceName], "workspace");
+  const members = await listExportMembers(environment.DB, workspaceId);
+  addMetadataBatch(budget, members, "members");
+  const pages = await listExportPages(environment.DB, workspaceId);
+  addMetadataBatch(budget, pages, "pages");
+  const versions = await listExportVersions(
+    environment.DB,
+    environment.FILES,
+    workspaceId,
+  );
+  addMetadataBatch(budget, versions, "versions");
+  const assets = await listExportAssets(environment.FILES, workspaceId);
+  addMetadataBatch(budget, assets, "assets");
+  const acl = await listExportAcl(environment.DB, workspaceId);
+  addMetadataBatch(budget, acl, "ACL entries");
+  const tags = await listExportTags(environment.DB, workspaceId);
+  addMetadataBatch(budget, tags, "tags");
+  const pageTags = await listExportPageTags(environment.DB, workspaceId);
+  addMetadataBatch(budget, pageTags, "page tags");
+  const links = await listExportLinks(environment.DB, workspaceId);
+  addMetadataBatch(budget, links, "links");
+  const aliases = await listExportAliases(environment.DB, workspaceId);
+  addMetadataBatch(budget, aliases, "aliases");
+  const comments = await listExportComments(environment.DB, workspaceId);
+  addMetadataBatch(budget, comments, "comments");
   return {
     workspaceName,
     members,
@@ -1081,6 +1093,7 @@ async function listExportPages(
   workspaceId: string,
 ): Promise<PortableExportPage[]> {
   const result: PortableExportPage[] = [];
+  const budget = { items: 0, bytes: 0 };
   let cursor = "";
   let batchSize: number;
   do {
@@ -1097,6 +1110,7 @@ async function listExportPages(
       )
       .bind(workspaceId, cursor)
       .all<PageDescriptorRow>();
+    addMetadataBatch(budget, rows.results, "page descriptors");
     for (const row of rows.results) {
       result.push({
         id: row.id,
@@ -1217,6 +1231,7 @@ async function listExportAssets(
 ): Promise<PortableExportAsset[]> {
   const prefix = `assets/${workspaceId}/`;
   const result: PortableExportAsset[] = [];
+  const budget = { items: 0, bytes: 0 };
   let cursor: string | undefined;
   do {
     const listing = await bucket.list({
@@ -1225,6 +1240,7 @@ async function listExportAssets(
       ...(cursor === undefined ? {} : { cursor }),
       include: ["httpMetadata", "customMetadata"],
     });
+    addMetadataBatch(budget, listing.objects, "R2 assets");
     for (const object of listing.objects) {
       if (object.size > MAX_EXPORT_OBJECT_BYTES) {
         throw new Error(`Asset ${object.key} exceeds the export object limit`);
@@ -1262,6 +1278,7 @@ async function listR2Objects(
   prefix: string,
 ): Promise<R2Object[]> {
   const result: R2Object[] = [];
+  const budget = { items: 0, bytes: 0 };
   let cursor: string | undefined;
   do {
     const listing = await bucket.list({
@@ -1270,6 +1287,7 @@ async function listR2Objects(
       ...(cursor === undefined ? {} : { cursor }),
       include: ["customMetadata"],
     });
+    addMetadataBatch(budget, listing.objects, "R2 versions");
     result.push(...listing.objects);
     cursor = listing.truncated ? listing.cursor : undefined;
   } while (cursor !== undefined);
@@ -1412,18 +1430,35 @@ async function listWorkspaceRows<T>(
   query: string,
 ): Promise<T[]> {
   const result: T[] = [];
+  const budget = { items: 0, bytes: 0 };
   let offset = 0;
   let batchSize: number;
   do {
     const rows = await database
-      .prepare(`${query}\nLIMIT 500 OFFSET ?2`)
+      .prepare(`${query}\nLIMIT 100 OFFSET ?2`)
       .bind(workspaceId, offset)
       .all<T>();
+    addMetadataBatch(budget, rows.results, "D1 export rows");
     result.push(...rows.results);
     batchSize = rows.results.length;
     offset += rows.results.length;
-  } while (batchSize === 500);
+  } while (batchSize === 100);
   return result;
+}
+
+function addMetadataBatch(
+  budget: { items: number; bytes: number },
+  values: readonly unknown[],
+  label: string,
+): void {
+  budget.items += values.length;
+  if (budget.items > MAX_EXPORT_METADATA_ITEMS) {
+    throw new Error(`Export ${label} exceeds the metadata item limit`);
+  }
+  budget.bytes += encoder.encode(JSON.stringify(values)).byteLength;
+  if (budget.bytes > MAX_EXPORT_METADATA_BYTES) {
+    throw new Error(`Export ${label} exceeds the metadata memory limit`);
+  }
 }
 
 async function loadPageBodies(

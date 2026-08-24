@@ -1,7 +1,7 @@
 CREATE TABLE exports (
   id TEXT PRIMARY KEY,
-  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE RESTRICT,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
   purpose TEXT NOT NULL DEFAULT 'download'
     CHECK (purpose IN ('download', 'backup')),
   retention_class TEXT
