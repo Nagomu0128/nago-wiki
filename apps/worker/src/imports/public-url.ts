@@ -102,10 +102,14 @@ async function readLimitedBody(
   const reader = body.getReader();
   const chunks: Uint8Array[] = [];
   let size = 0;
+  let done = false;
   try {
-    while (true) {
+    while (!done) {
       const result = await reader.read();
-      if (result.done) break;
+      if (result.done) {
+        done = true;
+        continue;
+      }
       size += result.value.byteLength;
       if (size > maximumBytes) {
         await reader.cancel("response exceeds import limit");
