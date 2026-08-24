@@ -48,8 +48,8 @@ const MAX_EXPORT_ARCHIVE_BYTES = 32 * 1024 * 1024 * 1024;
 const MAX_EXPORT_PLAN_BYTES = 8 * 1024 * 1024;
 const MAX_EXPORT_WORKFLOW_STEPS = 25_000;
 const MAX_EXPORT_SNAPSHOT_CAPTURE_ATTEMPTS = 3;
-// Reserve at least 4,200 of the 10,000 configured subrequests for the two
-// stable-snapshot fences (up to six captures, <=700 metadata reads each).
+// Keep one attempt below 9,200 storage calls; the configured 50,000 Workflow
+// limit accommodates the default five attempts without becoming unbounded.
 const MAX_EXPORT_IO_SUBREQUESTS = 5_000;
 const MAX_EXPORT_METADATA_ITEMS = 50_000;
 const MAX_EXPORT_METADATA_BYTES = 6 * 1024 * 1024;
