@@ -41,7 +41,10 @@ export function planStoredZip(
   for (const entry of entries) {
     centralSize += BigInt(centralRecordLength(entry));
   }
-  const needsZip64 = centralOffset > ZIP32_MAX || centralSize > ZIP32_MAX;
+  const needsZip64 =
+    centralOffset > ZIP32_MAX ||
+    centralSize > ZIP32_MAX ||
+    entries.length > 0xffff;
   const trailerSize = BigInt(22 + (needsZip64 ? 76 : 0));
   return {
     entries,
