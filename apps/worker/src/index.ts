@@ -18,6 +18,7 @@ import { D1WikiRepository } from "./core/repository";
 import { consumeAsyncJobs } from "./jobs/consumer";
 import { reconcilePendingJobs } from "./jobs/reconcile";
 import { createImportRoutes } from "./imports/routes";
+import { cleanupExpiredImports } from "./imports/cleanup";
 import { createMcpOAuthProvider } from "./mcp/oauth";
 import { isMcpOAuthPath } from "./mcp/security";
 import type { McpRuntimeEnv } from "./mcp/types";
@@ -119,6 +120,7 @@ export default {
     context.waitUntil(
       Promise.all([
         reconcilePendingJobs(environment),
+        cleanupExpiredImports(environment),
         environment.DISCORD_GATEWAY.getByName("gateway").start(),
       ]).then(() => undefined),
     );
