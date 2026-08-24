@@ -27,7 +27,7 @@ export type AdminMember = z.infer<typeof adminMemberSchema>;
 export const updateAdminMemberRequestSchema = z
   .object({
     role: workspaceRoleSchema.optional(),
-    status: userStatusSchema.optional(),
+    status: z.literal("suspended").optional(),
     expectedUpdatedAt: z.iso.datetime(),
   })
   .refine((value) => value.role !== undefined || value.status !== undefined, {

@@ -148,7 +148,10 @@ export class AdminService {
         ),
     ]);
     const updated = results[0]?.results[0];
-    if (updated !== undefined) return mapMember(updated);
+    if (updated !== undefined) {
+      const member = await this.findMember(identity.workspaceId, memberId);
+      if (member !== null) return mapMember(member);
+    }
 
     const latest = await this.findMember(identity.workspaceId, memberId);
     if (latest === null) throw memberNotFound();

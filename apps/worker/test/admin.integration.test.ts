@@ -36,6 +36,12 @@ describe("owner administration", () => {
 
   it("updates a member with optimistic concurrency and keeps an active owner", async () => {
     const service = new AdminService(env.DB);
+    await env.DB.prepare(
+      `INSERT INTO external_identities (provider, external_subject, user_id, linked_at)
+       VALUES ('discord', 'member-linked-subject', ?1, ?2)`,
+    )
+      .bind(viewer.id, new Date().toISOString())
+      .run();
     const members = await service.listMembers(owner);
     const editable = members.find((member) => member.id === viewer.id);
     const ownerMember = members.find((member) => member.id === owner.id);
@@ -44,10 +50,10 @@ describe("owner administration", () => {
 
     const updated = await service.updateMember(owner, viewer.id, {
       role: "editor",
-      status: "active",
       expectedUpdatedAt: editable.updatedAt,
     });
     expect(updated.role).toBe("editor");
+    expect(updated.linkedBotProviders).toEqual(["discord"]);
     await expect(
       service.updateMember(owner, viewer.id, {
         role: "viewer",
@@ -236,6 +242,23 @@ describe("owner administration", () => {
     );
     expect(malformed.status).toBe(400);
     await expect(malformed.json()).resolves.toMatchObject({
+      error: { code: "INVALID_REQUEST" },
+    });
+
+    const reactivation = await ownerApp.request(
+      `https://wiki.example/api/v1/admin/members/${viewer.id}`,
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          status: "active",
+          expectedUpdatedAt: new Date().toISOString(),
+        }),
+      },
+      env,
+    );
+    expect(reactivation.status).toBe(400);
+    await expect(reactivation.json()).resolves.toMatchObject({
       error: { code: "INVALID_REQUEST" },
     });
 
