@@ -71,6 +71,8 @@ const MAX_ORPHAN_OBJECTS_PER_PREFIX = 10_000;
 const MAX_ORPHAN_SCAN_PAGES_PER_RUN = 5;
 const IMPORT_ORPHAN_GRACE_MS = 24 * 60 * 60 * 1_000;
 const IMPORT_ORPHAN_SWEEP_TASK = "import-orphan-sweep";
+const IMPORT_APPLY_LEASE_MS = 15 * 60 * 1_000;
+const IMPORT_APPLY_RETRY_MS = 24 * 60 * 60 * 1_000;
 
 const googleStateSchema = z.object({
   userId: z.string(),
@@ -337,6 +339,11 @@ export function createImportRoutes(): Hono<ImportApi> {
         .catch({})
         .parse(parseJson(value.source_metadata_json));
       if (value.status === "applied" && typeof metadata.pageId === "string") {
+        await requireActiveAppliedPage(
+          context.env.DB,
+          identity.workspaceId,
+          metadata.pageId,
+        );
         return context.json(
           await createRealtimeWikiCoreService(context.env).getPage(
             identity,
@@ -349,85 +356,192 @@ export function createImportRoutes(): Hono<ImportApi> {
           message: "Import preview is not ready",
         });
       }
-      // Claim before reading/creating so expiry cleanup cannot delete the
-      // import between validation and the page transaction.
-      const claimed = await context.env.DB.prepare(
-        `UPDATE imports
-            SET expires_at = NULL,
-                source_metadata_json = json_set(source_metadata_json, '$.applying', 1),
-                updated_at = ?2
-          WHERE id = ?1 AND status = 'preview_ready'
-            AND (expires_at IS NULL OR expires_at > ?2)`,
-      )
-        .bind(importId, new Date().toISOString())
-        .run();
-      if (claimed.meta.changes !== 1) {
-        throw new HTTPException(410, { message: "Import preview has expired" });
-      }
       const previewKey =
         typeof metadata.previewKey === "string" ? metadata.previewKey : null;
-      if (previewKey === null) {
+      if (previewKey === null || value.report_r2_key === null) {
         throw new HTTPException(409, {
           message: "Import preview is unavailable",
         });
       }
-      const preview = await context.env.FILES.get(previewKey);
-      if (preview === null || preview.size > 1_048_576) {
+      const [preview, report] = await Promise.all([
+        context.env.FILES.get(previewKey),
+        context.env.FILES.get(value.report_r2_key),
+      ]);
+      if (
+        preview === null ||
+        preview.size > 1_048_576 ||
+        report === null ||
+        report.size > 1_048_576
+      ) {
+        throw new HTTPException(409, {
+          message: "Import preview is unavailable",
+        });
+      }
+      const [previewMarkdown, reportBody] = await Promise.all([
+        preview.text(),
+        report.text(),
+      ]);
+      try {
+        JSON.parse(reportBody);
+      } catch {
         throw new HTTPException(409, {
           message: "Import preview is unavailable",
         });
       }
       const request = context.req.valid("json");
-      const page = await createRealtimeWikiCoreService(context.env).createPage(
-        identity,
-        {
+      const requestHash = await hashMarkdown(
+        JSON.stringify({
           parentId: request.parentId,
           title: request.title,
-          bodyMd: await preview.text(),
-          accessMode: "workspace",
-        },
-        `import:${importId}`,
+          acceptedTags: request.acceptedTags,
+        }),
       );
-      await applyAcceptedTags(
-        context.env.DB,
-        identity.workspaceId,
-        page.page.id,
-        request.acceptedTags,
-      );
-      const appliedAt = new Date().toISOString();
-      await context.env.DB.batch([
-        context.env.DB.prepare(
-          `UPDATE imports
-              SET status = 'applied',
-                  source_metadata_json = json_remove(
-                    json_set(source_metadata_json, '$.pageId', ?2), '$.applying'
-                  ),
-                  updated_at = ?3
-            WHERE id = ?1 AND status = 'preview_ready'`,
-        ).bind(importId, page.page.id, appliedAt),
-        context.env.DB.prepare(
-          `INSERT INTO audit_events (
-             id, actor_id, action, target_type, target_id, metadata_json, created_at
-           ) VALUES (?1, ?2, 'import.applied', 'import', ?3, ?4, ?5)
-           ON CONFLICT(id) DO NOTHING`,
-        ).bind(
+      const claimedAt = new Date();
+      const leaseId = crypto.randomUUID();
+      const leaseUntil = new Date(
+        claimedAt.getTime() + IMPORT_APPLY_LEASE_MS,
+      ).toISOString();
+      const retryUntil = new Date(
+        claimedAt.getTime() + IMPORT_APPLY_RETRY_MS,
+      ).toISOString();
+      const claimed = await context.env.DB.prepare(
+        `UPDATE imports
+            SET expires_at = CASE
+                  WHEN expires_at IS NULL OR expires_at < ?4 THEN ?4
+                  ELSE expires_at
+                END,
+                source_metadata_json = json_set(
+                  source_metadata_json,
+                  '$.applying', 1,
+                  '$.applyLeaseId', ?5,
+                  '$.applyLeaseUntil', ?3,
+                  '$.applyRequestHash', ?6
+                ),
+                updated_at = ?2
+          WHERE id = ?1 AND status = 'preview_ready'
+            AND (expires_at IS NULL OR expires_at > ?2)
+            AND (
+              json_extract(source_metadata_json, '$.applyRequestHash') IS NULL
+              OR json_extract(source_metadata_json, '$.applyRequestHash') = ?6
+            )
+            AND (
+              json_extract(source_metadata_json, '$.applyLeaseUntil') IS NULL
+              OR json_extract(source_metadata_json, '$.applyLeaseUntil') <= ?2
+            )`,
+      )
+        .bind(
           importId,
-          identity.id,
-          importId,
-          JSON.stringify({
-            pageId: page.page.id,
-            sourceType: value.source_type,
-          }),
-          appliedAt,
-        ),
-      ]);
-      return context.json(
-        await createRealtimeWikiCoreService(context.env).getPage(
+          claimedAt.toISOString(),
+          leaseUntil,
+          retryUntil,
+          leaseId,
+          requestHash,
+        )
+        .run();
+      if (claimed.meta.changes !== 1) {
+        const current = await context.env.DB.prepare(
+          `SELECT expires_at,
+                  json_extract(source_metadata_json, '$.applyRequestHash') AS request_hash,
+                  json_extract(source_metadata_json, '$.applyLeaseUntil') AS lease_until
+             FROM imports WHERE id = ?1 AND status = 'preview_ready'`,
+        )
+          .bind(importId)
+          .first<{
+            expires_at: string | null;
+            request_hash: string | null;
+            lease_until: string | null;
+          }>();
+        if (
+          current !== null &&
+          current.request_hash !== null &&
+          current.request_hash !== requestHash
+        ) {
+          throw new HTTPException(409, {
+            message: "Import is already being applied with different options",
+          });
+        }
+        if (
+          current !== null &&
+          current.lease_until !== null &&
+          current.lease_until > claimedAt.toISOString()
+        ) {
+          throw new HTTPException(409, { message: "Import is already being applied" });
+        }
+        throw new HTTPException(410, { message: "Import preview has expired" });
+      }
+
+      try {
+        const service = createRealtimeWikiCoreService(context.env);
+        const page = await service.createPage(
           identity,
+          {
+            parentId: request.parentId,
+            title: request.title,
+            bodyMd: previewMarkdown,
+            accessMode: "workspace",
+          },
+          `import:${importId}`,
+        );
+        if (page.page.status !== "active") {
+          throw new HTTPException(409, {
+            message: "The page previously created by this import is in trash",
+          });
+        }
+        await applyAcceptedTags(
+          context.env.DB,
+          identity.workspaceId,
           page.page.id,
-        ),
-        201,
-      );
+          request.acceptedTags,
+        );
+        const appliedAt = new Date().toISOString();
+        const completed = await context.env.DB.batch([
+          context.env.DB.prepare(
+            `UPDATE imports
+                SET status = 'applied',
+                    expires_at = NULL,
+                    source_metadata_json = json_remove(
+                      json_set(source_metadata_json, '$.pageId', ?2),
+                      '$.applying', '$.applyLeaseId', '$.applyLeaseUntil'
+                    ),
+                    updated_at = ?3
+              WHERE id = ?1 AND status = 'preview_ready'
+                AND json_extract(source_metadata_json, '$.applyLeaseId') = ?4`,
+          ).bind(importId, page.page.id, appliedAt, leaseId),
+          context.env.DB.prepare(
+            `INSERT INTO audit_events (
+               id, actor_id, action, target_type, target_id, metadata_json, created_at
+             ) VALUES (?1, ?2, 'import.applied', 'import', ?3, ?4, ?5)
+             ON CONFLICT(id) DO NOTHING`,
+          ).bind(
+            importId,
+            identity.id,
+            importId,
+            JSON.stringify({
+              pageId: page.page.id,
+              sourceType: value.source_type,
+            }),
+            appliedAt,
+          ),
+        ]);
+        if (completed[0]?.meta.changes !== 1) {
+          throw new HTTPException(409, { message: "Import apply lease was lost" });
+        }
+        return context.json(await service.getPage(identity, page.page.id), 201);
+      } catch (error) {
+        await context.env.DB.prepare(
+          `UPDATE imports
+              SET source_metadata_json = json_remove(
+                    source_metadata_json,
+                    '$.applying', '$.applyLeaseId', '$.applyLeaseUntil'
+                  ),
+                  updated_at = ?2
+            WHERE id = ?1 AND status = 'preview_ready'
+              AND json_extract(source_metadata_json, '$.applyLeaseId') = ?3`,
+        )
+          .bind(importId, new Date().toISOString(), leaseId)
+          .run();
+        throw error;
+      }
     },
   );
 
@@ -993,6 +1107,22 @@ async function applyAcceptedTags(
     );
   }
   await database.batch(statements);
+}
+
+async function requireActiveAppliedPage(
+  database: D1Database,
+  workspaceId: string,
+  pageId: string,
+): Promise<void> {
+  const page = await database
+    .prepare("SELECT status FROM pages WHERE id = ?1 AND workspace_id = ?2")
+    .bind(pageId, workspaceId)
+    .first<{ status: string }>();
+  if (page?.status !== "active") {
+    throw new HTTPException(409, {
+      message: "The page created by this import is no longer active",
+    });
+  }
 }
 
 async function prepareImportSource(
