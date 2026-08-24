@@ -635,8 +635,9 @@ async function collectStableExportMetadata(
   environment: Pick<McpRuntimeEnv, "DB" | "FILES">,
   workspaceId: string,
 ) {
-  let previous = await collectExportMetadata(environment, workspaceId);
-  let previousHash = await exportMetadataHash(previous);
+  let previousHash = await exportMetadataHash(
+    await collectExportMetadata(environment, workspaceId),
+  );
   for (
     let attempt = 1;
     attempt < MAX_EXPORT_SNAPSHOT_CAPTURE_ATTEMPTS;
@@ -645,7 +646,6 @@ async function collectStableExportMetadata(
     const current = await collectExportMetadata(environment, workspaceId);
     const currentHash = await exportMetadataHash(current);
     if (currentHash === previousHash) return current;
-    previous = current;
     previousHash = currentHash;
   }
   throw new Error(
@@ -1703,18 +1703,44 @@ async function sha256Bytes(value: Uint8Array): Promise<string> {
   return bytesToHex(new Uint8Array(digest));
 }
 
-function safeAssetFilename(value: string): string {
-  const withoutSeparators = value.normalize("NFKC").replaceAll(/[/\\]/gu, "_");
+export function safeAssetFilename(value: string): string {
+  const withoutSeparators = value.normalize("NFKC").replaceAll(/[/\\:]/gu, "_");
   const normalized = Array.from(withoutSeparators, (character) => {
     const codePoint = character.codePointAt(0) ?? 0;
-    return codePoint <= 0x1f || codePoint === 0x7f ? "_" : character;
+    return codePoint <= 0x1f || codePoint === 0x7f || /[<>"|?*]/u.test(character)
+      ? "_"
+      : character;
   })
     .join("")
+    .replace(/[. ]+$/u, "")
     .trim();
-  if (normalized.length === 0 || normalized === "." || normalized === "..") {
+  const stem = normalized.split(".")[0]?.toUpperCase();
+  if (
+    normalized.length === 0 ||
+    normalized === "." ||
+    normalized === ".." ||
+    stem === "CON" || stem === "PRN" || stem === "AUX" || stem === "NUL" ||
+    /^(COM|LPT)[1-9]$/u.test(stem ?? "")
+  ) {
     return "asset";
   }
-  return normalized.slice(0, 200);
+  const bytes = new TextEncoder();
+  let result = "";
+  for (const character of normalized) {
+    if (bytes.encode(result + character).byteLength > 200) break;
+    result += character;
+  }
+  const portable = result.replace(/[. ]+$/u, "");
+  const portableStem = portable.split(".")[0]?.toUpperCase();
+  if (
+    portable.length === 0 ||
+    portableStem === "CON" || portableStem === "PRN" ||
+    portableStem === "AUX" || portableStem === "NUL" ||
+    /^(COM|LPT)[1-9]$/u.test(portableStem ?? "")
+  ) {
+    return "asset";
+  }
+  return portable;
 }
 
 function nonEmpty(value: string | undefined): string | null {

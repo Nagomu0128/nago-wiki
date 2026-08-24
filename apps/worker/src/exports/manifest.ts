@@ -669,6 +669,30 @@ export function isPortablePath(value: string): boolean {
   }
   const segments = value.split("/");
   return segments.every(
-    (segment) => segment.length > 0 && segment !== "." && segment !== "..",
+    (segment) =>
+      segment.length > 0 &&
+      segment !== "." &&
+      segment !== ".." &&
+      !hasUnsafeWindowsPathCharacter(segment) &&
+      !/[. ]$/u.test(segment) &&
+      !isWindowsReservedName(segment),
+  );
+}
+
+function hasUnsafeWindowsPathCharacter(value: string): boolean {
+  return Array.from(value).some((character) => {
+    const codePoint = character.codePointAt(0) ?? 0;
+    return codePoint <= 0x1f || /[<>:"|?*]/u.test(character);
+  });
+}
+
+function isWindowsReservedName(value: string): boolean {
+  const stem = value.split(".")[0]?.toUpperCase();
+  return (
+    stem === "CON" ||
+    stem === "PRN" ||
+    stem === "AUX" ||
+    stem === "NUL" ||
+    /^(COM|LPT)[1-9]$/u.test(stem ?? "")
   );
 }

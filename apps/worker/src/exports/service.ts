@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import {
+  exportArtifactPrefix,
   exportWorkflowParamsSchema,
   type ExportWorkflowParams,
 } from "./workflow";
@@ -8,6 +9,8 @@ import { createUuidV7 } from "../core/ids";
 import type { McpRuntimeEnv } from "../mcp/types";
 
 export const WEEKLY_BACKUP_CRON = "0 18 * * 6";
+export const PORTABLE_EXPORT_CLEANUP_CRON = "0 19 * * *";
+const MAX_CLEANUP_EXPORTS_PER_RUN = 2_000;
 
 export interface StartPortableExportInput {
   workspaceId: string;
@@ -23,18 +26,21 @@ export interface StartedPortableExport {
   created: boolean;
 }
 
-interface ExistingBackupRow {
+interface PortableExportIntentRow {
   id: string;
   workspace_id: string;
   user_id: string;
-  purpose: "backup";
-  retention_class: "weekly" | "monthly";
-  backup_date: string;
+  purpose: "download" | "backup";
+  retention_class: "weekly" | "monthly" | null;
+  backup_date: string | null;
   status: "queued" | "running" | "ready" | "failed" | "cancelled";
 }
 
 interface ExpiredExportRow {
   id: string;
+  workspace_id: string;
+  purpose: "download" | "backup";
+  backup_date: string | null;
   r2_key: string | null;
   plan_r2_key: string | null;
 }
@@ -100,22 +106,89 @@ export async function startPortableExport(
       parameters.backupDate,
     );
     if (existing === null) throw error;
-    await ensureExportWorkflow(environment.EXPORT_WORKFLOW, rowParameters(existing));
+    await ensureExportWorkflow(
+      environment.EXPORT_WORKFLOW,
+      rowParameters(existing),
+    ).catch((workflowError: unknown) => {
+      console.error("Deferred existing export Workflow recovery", {
+        exportId: existing.id,
+        error:
+          workflowError instanceof Error
+            ? workflowError.message
+            : "Unknown error",
+      });
+    });
     return { id: existing.id, status: "queued", created: false };
   }
 
-  await createExportWorkflow(environment.EXPORT_WORKFLOW, parameters);
+  await createExportWorkflow(environment.EXPORT_WORKFLOW, parameters).catch(
+    (error: unknown) => {
+      console.error("Deferred export Workflow creation", {
+        exportId: parameters.exportId,
+        error: error instanceof Error ? error.message : "Unknown error",
+      });
+    },
+  );
   return { id: parameters.exportId, status: "queued", created: true };
+}
+
+export async function reconcileQueuedPortableExports(
+  environment: Pick<McpRuntimeEnv, "DB" | "EXPORT_WORKFLOW">,
+  now = new Date(),
+): Promise<{ resumed: number; failed: number }> {
+  const cutoff = new Date(now.getTime() - 5 * 60_000).toISOString();
+  const rows = await environment.DB.prepare(
+    `SELECT id, workspace_id, user_id, purpose, retention_class,
+            backup_date, status
+       FROM exports
+      WHERE status IN ('queued', 'running') AND updated_at <= ?1
+      ORDER BY updated_at, id
+      LIMIT 100`,
+  )
+    .bind(cutoff)
+    .all<PortableExportIntentRow>();
+  let resumed = 0;
+  let failed = 0;
+  for (const row of rows.results) {
+    try {
+      await ensureExportWorkflow(
+        environment.EXPORT_WORKFLOW,
+        rowParameters(row),
+      );
+      await environment.DB.prepare(
+        `UPDATE exports SET updated_at = ?2
+          WHERE id = ?1 AND status IN ('queued', 'running')`,
+      )
+        .bind(row.id, now.toISOString())
+        .run();
+      resumed += 1;
+    } catch (error) {
+      failed += 1;
+      await environment.DB.prepare(
+        `UPDATE exports SET updated_at = ?2
+          WHERE id = ?1 AND status IN ('queued', 'running')`,
+      )
+        .bind(row.id, now.toISOString())
+        .run();
+      console.error("Failed to reconcile queued export", {
+        exportId: row.id,
+        error: error instanceof Error ? error.message : "Unknown error",
+      });
+    }
+  }
+  return { resumed, failed };
 }
 
 export async function runWeeklyBackupMaintenance(
   environment: McpRuntimeEnv,
   now = new Date(),
-): Promise<{ started: number; resumed: number; cleaned: number }> {
+): Promise<{
+  started: number;
+  resumed: number;
+  failed: number;
+  cleaned: number;
+}> {
   const backupDate = japanDate(now);
-  const retentionClass = Number(backupDate.slice(8, 10)) <= 7
-    ? "monthly"
-    : "weekly";
   const owners = await environment.DB.prepare(
     `SELECT w.id AS workspace_id,
             (SELECT u.id FROM users u
@@ -132,53 +205,98 @@ export async function runWeeklyBackupMaintenance(
   ).all<WorkspaceOwnerRow>();
   let started = 0;
   let resumed = 0;
+  let failed = 0;
   for (const owner of owners.results) {
-    const result = await startPortableExport(environment, {
-      workspaceId: owner.workspace_id,
-      requestedBy: owner.owner_id,
-      purpose: "backup",
-      backupDate,
-      retentionClass,
-    });
-    if (result.created) started += 1;
-    else resumed += 1;
+    try {
+      const retentionClass = await backupRetentionClass(
+        environment.DB,
+        owner.workspace_id,
+        backupDate,
+      );
+      const result = await startPortableExport(environment, {
+        workspaceId: owner.workspace_id,
+        requestedBy: owner.owner_id,
+        purpose: "backup",
+        backupDate,
+        retentionClass,
+      });
+      if (result.created) started += 1;
+      else resumed += 1;
+    } catch (error) {
+      failed += 1;
+      console.error("Failed to start workspace backup", {
+        workspaceId: owner.workspace_id,
+        error: error instanceof Error ? error.message : "Unknown error",
+      });
+    }
   }
   const cleaned = await cleanupExpiredPortableExports(
     environment,
     now.toISOString(),
   );
-  return { started, resumed, cleaned };
+  return { started, resumed, failed, cleaned };
 }
 
 export async function cleanupExpiredPortableExports(
   environment: Pick<McpRuntimeEnv, "DB" | "FILES">,
   now = new Date().toISOString(),
 ): Promise<number> {
-  const rows = await environment.DB.prepare(
-    `SELECT id, r2_key, plan_r2_key
-       FROM exports
-      WHERE expires_at IS NOT NULL AND expires_at <= ?1
-        AND status IN ('ready', 'failed')
-      ORDER BY expires_at, id
-      LIMIT 100`,
-  )
-    .bind(now)
-    .all<ExpiredExportRow>();
-  for (const row of rows.results) {
-    const artifactKey = row.r2_key ?? row.plan_r2_key;
-    if (artifactKey !== null) {
-      await deleteR2Prefix(environment.FILES, artifactPrefix(artifactKey));
-    }
-    await environment.DB.prepare(
-      `UPDATE exports
-          SET status = 'cancelled', r2_key = NULL, plan_r2_key = NULL,
-              multipart_upload_id = NULL, updated_at = ?2
-        WHERE id = ?1 AND expires_at IS NOT NULL AND expires_at <= ?2`,
+  let cleaned = 0;
+  while (cleaned < MAX_CLEANUP_EXPORTS_PER_RUN) {
+    const limit = Math.min(100, MAX_CLEANUP_EXPORTS_PER_RUN - cleaned);
+    const rows = await environment.DB.prepare(
+      `SELECT id, workspace_id, purpose, backup_date, r2_key, plan_r2_key
+         FROM exports
+        WHERE expires_at IS NOT NULL AND expires_at <= ?1
+          AND status IN ('ready', 'failed')
+        ORDER BY expires_at, id
+        LIMIT ?2`,
     )
-      .bind(row.id, now)
-      .run();
+      .bind(now, limit)
+      .all<ExpiredExportRow>();
+    if (rows.results.length === 0) break;
+    for (const row of rows.results) {
+      await deleteR2Prefix(
+        environment.FILES,
+        exportArtifactPrefix({
+          exportId: row.id,
+          workspaceId: row.workspace_id,
+          purpose: row.purpose,
+          backupDate: row.backup_date,
+        }),
+      );
+      await environment.DB.prepare(
+        `UPDATE exports
+            SET status = 'cancelled', r2_key = NULL, plan_r2_key = NULL,
+                multipart_upload_id = NULL, updated_at = ?2
+          WHERE id = ?1 AND expires_at IS NOT NULL AND expires_at <= ?2`,
+      )
+        .bind(row.id, now)
+        .run();
+      cleaned += 1;
+    }
+    if (rows.results.length < limit) break;
   }
-  return rows.results.length;
+  return cleaned;
+}
+
+async function backupRetentionClass(
+  database: D1Database,
+  workspaceId: string,
+  backupDate: string,
+): Promise<"weekly" | "monthly"> {
+  const monthPrefix = `${backupDate.slice(0, 7)}-%`;
+  const representative = await database
+    .prepare(
+      `SELECT id FROM exports
+        WHERE workspace_id = ?1 AND purpose = 'backup'
+          AND retention_class = 'monthly' AND backup_date LIKE ?2
+          AND status IN ('queued', 'running', 'ready')
+        LIMIT 1`,
+    )
+    .bind(workspaceId, monthPrefix)
+    .first<{ id: string }>();
+  return representative === null ? "monthly" : "weekly";
 }
 
 async function createExportWorkflow(
@@ -216,7 +334,7 @@ async function findBackup(
   database: D1Database,
   workspaceId: string,
   backupDate: string,
-): Promise<ExistingBackupRow | null> {
+): Promise<PortableExportIntentRow | null> {
   return database
     .prepare(
       `SELECT id, workspace_id, user_id, purpose, retention_class,
@@ -225,10 +343,10 @@ async function findBackup(
         WHERE workspace_id = ?1 AND purpose = 'backup' AND backup_date = ?2`,
     )
     .bind(workspaceId, backupDate)
-    .first<ExistingBackupRow>();
+    .first<PortableExportIntentRow>();
 }
 
-function rowParameters(row: ExistingBackupRow): ExportWorkflowParams {
+function rowParameters(row: PortableExportIntentRow): ExportWorkflowParams {
   return exportWorkflowParamsSchema.parse({
     exportId: row.id,
     workspaceId: row.workspace_id,
@@ -249,12 +367,6 @@ function japanDate(value: Date): string {
   const get = (type: Intl.DateTimeFormatPartTypes): string =>
     parts.find((part) => part.type === type)?.value ?? "";
   return z.iso.date().parse(`${get("year")}-${get("month")}-${get("day")}`);
-}
-
-function artifactPrefix(key: string): string {
-  const slash = key.lastIndexOf("/");
-  if (slash <= 0) throw new Error("Export artifact key is invalid");
-  return key.slice(0, slash + 1);
 }
 
 async function deleteR2Prefix(bucket: R2Bucket, prefix: string): Promise<void> {

@@ -19,6 +19,9 @@ import { consumeAsyncJobs } from "./jobs/consumer";
 import { reconcilePendingJobs } from "./jobs/reconcile";
 import { createExportRoutes } from "./exports/routes";
 import {
+  cleanupExpiredPortableExports,
+  PORTABLE_EXPORT_CLEANUP_CRON,
+  reconcileQueuedPortableExports,
   runWeeklyBackupMaintenance,
   WEEKLY_BACKUP_CRON,
 } from "./exports/service";
@@ -124,15 +127,43 @@ export default {
   },
   queue: consumeAsyncJobs,
   scheduled(controller, environment, context) {
-    const tasks: Promise<unknown>[] = [
-      reconcilePendingJobs(environment),
-      cleanupExpiredImports(environment),
-      environment.DISCORD_GATEWAY.getByName("gateway").start(),
+    const tasks: { name: string; promise: Promise<unknown> }[] = [
+      { name: "job reconciliation", promise: reconcilePendingJobs(environment) },
+      {
+        name: "export Workflow reconciliation",
+        promise: reconcileQueuedPortableExports(environment),
+      },
+      { name: "expired import cleanup", promise: cleanupExpiredImports(environment) },
+      {
+        name: "Discord gateway",
+        promise: environment.DISCORD_GATEWAY.getByName("gateway").start(),
+      },
     ];
     if (controller.cron === WEEKLY_BACKUP_CRON) {
-      tasks.push(runWeeklyBackupMaintenance(environment));
+      tasks.push({
+        name: "weekly portable backup",
+        promise: runWeeklyBackupMaintenance(environment),
+      });
+    } else if (controller.cron === PORTABLE_EXPORT_CLEANUP_CRON) {
+      tasks.push({
+        name: "portable export cleanup",
+        promise: cleanupExpiredPortableExports(environment),
+      });
     }
-    context.waitUntil(Promise.all(tasks).then(() => undefined));
+    context.waitUntil(
+      Promise.allSettled(tasks.map((task) => task.promise)).then((results) => {
+        for (const [index, result] of results.entries()) {
+          if (result.status === "rejected") {
+            console.error(`Scheduled ${tasks[index]?.name ?? "task"} failed`, {
+              error:
+                result.reason instanceof Error
+                  ? result.reason.message
+                  : "Unknown error",
+            });
+          }
+        }
+      }),
+    );
   },
 } satisfies ExportedHandler<McpRuntimeEnv>;
 
