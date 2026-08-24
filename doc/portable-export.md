@@ -36,6 +36,12 @@ are reconciled every minute, and the daily cleanup trigger drains expired R2
 artifacts in bounded batches. Import artifacts without a matching durable D1
 intent are swept only after a 24-hour ambiguity grace period.
 
+An export plan is an immutable logical snapshot: because D1 and R2 cannot
+share a transaction, the Workflow captures the complete metadata graph twice
+and proceeds only when both observations match. It fences the same graph again
+before publication; a concurrent metadata change fails the export for a retry
+rather than producing a mixed-generation archive.
+
 - The first weekly backup in each Japanese calendar month is the monthly
   representative and is retained for 12 calendar months.
 - Other weekly backups are retained for 90 days.
