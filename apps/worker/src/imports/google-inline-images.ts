@@ -1,4 +1,5 @@
 import type { GoogleDocsInlineImage } from "./google-docs-parser";
+import { GoogleRetriableError } from "./google-client";
 
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 const MAX_TOTAL_IMAGE_BYTES = 50 * 1024 * 1024;
@@ -57,21 +58,43 @@ export async function importGoogleInlineImages(
 
   for (const [index, image] of images.entries()) {
     try {
-      const response = await (options.fetchImage ?? fetch)(image.contentUri);
-      if (!response.ok || response.body === null) {
-        throw new Error(`image request returned ${String(response.status)}`);
+      let response: Response;
+      try {
+        response = await (options.fetchImage ?? fetch)(image.contentUri);
+      } catch {
+        throw new GoogleRetriableError("Google image request failed", 5_000);
+      }
+      if (response.status === 429 || response.status >= 500) {
+        throw new GoogleRetriableError(
+          `Google image request temporarily failed with status ${String(response.status)}`,
+          retryAfterMilliseconds(response.headers.get("retry-after")),
+        );
+      }
+      if (!response.ok) {
+        throw new GoogleImageSkipError(
+          `image request returned ${String(response.status)}`,
+        );
+      }
+      if (response.body === null) {
+        throw new GoogleRetriableError("Google image response body was unavailable", 5_000);
       }
       const declaredLength = parseContentLength(response.headers.get("content-length"));
       if (declaredLength !== null && declaredLength > MAX_IMAGE_BYTES) {
         await response.body.cancel();
-        throw new Error("image exceeds the 10 MiB limit");
+        throw new GoogleImageSkipError("image exceeds the 10 MiB limit");
       }
-      const bytes = await readStreamWithinLimit(response.body, MAX_IMAGE_BYTES);
+      let bytes: Uint8Array;
+      try {
+        bytes = await readStreamWithinLimit(response.body, MAX_IMAGE_BYTES);
+      } catch (error) {
+        if (error instanceof GoogleImageSkipError) throw error;
+        throw new GoogleRetriableError("Google image response was interrupted", 5_000);
+      }
       if (totalBytes + bytes.byteLength > MAX_TOTAL_IMAGE_BYTES) {
-        throw new Error("document images exceed the 50 MiB total limit");
+        throw new GoogleImageSkipError("document images exceed the 50 MiB total limit");
       }
       const policy = sniffImage(bytes);
-      if (policy === null) throw new Error("image format is not supported");
+      if (policy === null) throw new GoogleImageSkipError("image format is not supported");
       totalBytes += bytes.byteLength;
       const assetId = await stableAssetId(options.importId, image.objectId);
       const filename = `google-image-${String(index + 1)}${policy.extension}`;
@@ -113,6 +136,7 @@ export async function importGoogleInlineImages(
         altText: image.altText,
       });
     } catch (error) {
+      if (!(error instanceof GoogleImageSkipError)) throw error;
       warnings.push(
         `Google Docs image ${image.objectId} was skipped: ${publicImageError(error)}`,
       );
@@ -245,7 +269,7 @@ async function readStreamWithinLimit(
       size += result.value.byteLength;
       if (size > limit) {
         await reader.cancel();
-        throw new Error("image exceeds the 10 MiB limit");
+        throw new GoogleImageSkipError("image exceeds the 10 MiB limit");
       }
       chunks.push(result.value);
       result = await reader.read();
@@ -305,4 +329,19 @@ function escapeMarkdownAlt(value: string): string {
 function publicImageError(error: unknown): string {
   const message = error instanceof Error ? error.message : "image download failed";
   return message.replace(/https?:\/\/\S+/giu, "[redacted URL]").slice(0, 300);
+}
+
+class GoogleImageSkipError extends Error {}
+
+function retryAfterMilliseconds(value: string | null): number {
+  if (value !== null && /^\d{1,7}$/u.test(value.trim())) {
+    return Math.max(1_000, Math.min(60 * 60 * 1_000, Number(value.trim()) * 1_000));
+  }
+  if (value !== null) {
+    const retryAt = Date.parse(value);
+    if (Number.isFinite(retryAt)) {
+      return Math.max(1_000, Math.min(60 * 60 * 1_000, retryAt - Date.now()));
+    }
+  }
+  return 5_000;
 }
