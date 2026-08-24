@@ -58,6 +58,26 @@ describe("stored ZIP writer", () => {
       buildStoredLocalRecord(entryAt(plan.entries, 0), encoder.encode("five!")),
     ).toThrow("ZIP entry size changed");
   });
+
+  it("adds ZIP64 end records when local offsets exceed ZIP32", () => {
+    const plan = planStoredZip([
+      { name: "large.bin", size: 0xffff_ffff },
+      { name: "manifest.json", size: 2 },
+    ]);
+    const central = buildCentralDirectory(
+      plan,
+      new Map([
+        ["large.bin", 0],
+        ["manifest.json", 0],
+      ]),
+    );
+    const view = new DataView(central.buffer);
+
+    expect(plan.centralOffset).toBeGreaterThan(0xffff_ffff);
+    expect(central.byteLength).toBe(plan.centralSize + 76 + 22);
+    expect(view.getUint32(plan.centralSize, true)).toBe(0x06064b50);
+    expect(view.getUint32(central.byteLength - 22, true)).toBe(0x06054b50);
+  });
 });
 
 function concatenate(chunks: Uint8Array[]): Uint8Array {

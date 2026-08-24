@@ -3,6 +3,7 @@ import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 
 import type { ExportWorkflowParams } from "./workflow";
+import { createUuidV7 } from "../core/ids";
 import type { McpRuntimeEnv } from "../mcp/types";
 
 interface ExportApi {
@@ -35,7 +36,7 @@ export function createExportRoutes(): Hono<ExportApi> {
   routes.post("/exports", async (context) => {
     const identity = requireExportIdentity(context.get("identity"));
     await requireOwner(context.env.DB, identity);
-    const exportId = crypto.randomUUID();
+    const exportId = createUuidV7();
     const now = new Date().toISOString();
     await context.env.DB.batch([
       context.env.DB.prepare(
@@ -47,7 +48,7 @@ export function createExportRoutes(): Hono<ExportApi> {
         `INSERT INTO audit_events (
            id, actor_id, action, target_type, target_id, metadata_json, created_at
          ) VALUES (?1, ?2, 'export.started', 'export', ?3, '{}', ?4)`,
-      ).bind(crypto.randomUUID(), identity.id, exportId, now),
+      ).bind(createUuidV7(), identity.id, exportId, now),
     ]);
 
     const parameters: ExportWorkflowParams = {

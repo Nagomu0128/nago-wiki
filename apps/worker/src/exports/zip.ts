@@ -57,6 +57,7 @@ export function planStoredZip(
 export function buildStoredLocalRecord(
   entry: ZipEntryPlan,
   data: Uint8Array,
+  knownCrc32 = crc32(data),
 ): Uint8Array {
   if (data.byteLength !== entry.size) {
     throw new Error(`ZIP entry size changed for ${entry.name}`);
@@ -79,7 +80,7 @@ export function buildStoredLocalRecord(
   output.set(data, 30 + name.byteLength);
   const descriptorOffset = 30 + name.byteLength + data.byteLength;
   writeUint32(view, descriptorOffset, DATA_DESCRIPTOR_SIGNATURE);
-  writeUint32(view, descriptorOffset + 4, crc32(data));
+  writeUint32(view, descriptorOffset + 4, knownCrc32);
   writeUint32(view, descriptorOffset + 8, data.byteLength);
   writeUint32(view, descriptorOffset + 12, data.byteLength);
   return output;
