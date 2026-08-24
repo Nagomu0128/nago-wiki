@@ -6,6 +6,7 @@ import { ApiProblem } from "../core/errors";
 import { TagsService } from "../core/tags-service";
 import { decodeCursor, encodeCursor } from "../mcp/pagination";
 import { McpWikiRepository } from "../mcp/repository";
+import type { McpRuntimeEnv } from "../mcp/types";
 
 const replaceTagsSchema = z.object({
   names: z.array(z.string().trim().min(1).max(100)).max(50),
@@ -37,7 +38,18 @@ export function createOrganizationRoutes(): Hono<CoreHonoEnv> {
   routes.get("/pages/:id/backlinks", async (context) => {
     const identity = requireIdentity(context);
     const encodedCursor = context.req.query("cursor");
-    const cursor = decodeCursor(encodedCursor);
+    const cursorContext = {
+      userId: identity.id,
+      workspaceId: identity.workspaceId,
+      collection: "backlinks" as const,
+      targetPageId: context.req.param("id"),
+    };
+    const tokenEncryptionKey = (context.env as McpRuntimeEnv).TOKEN_ENCRYPTION_KEY;
+    const cursor = await decodeCursor(
+      encodedCursor,
+      tokenEncryptionKey,
+      cursorContext,
+    );
     const requestedLimit = Number.parseInt(context.req.query("limit") ?? "50", 10);
     if (
       (encodedCursor !== undefined && cursor === null) ||
@@ -51,21 +63,16 @@ export function createOrganizationRoutes(): Hono<CoreHonoEnv> {
       context.env.DB,
       new URL(context.env.MCP_PUBLIC_ORIGIN).origin,
     );
-    const target = await repository.getPage(
-      identity.id,
-      identity.workspaceId,
-      context.req.param("id"),
-    );
-    if (target === null) {
-      throw new ApiProblem("PAGE_NOT_FOUND", 404, "Page was not found or is not visible");
-    }
     const result = await repository.getBacklinks(
       identity.id,
       identity.workspaceId,
-      target.id,
+      context.req.param("id"),
       cursor,
       requestedLimit,
     );
+    if (result === null) {
+      throw new ApiProblem("PAGE_NOT_FOUND", 404, "Page was not found or is not visible");
+    }
     return context.json({
       pages: result.pages.map((page) => ({
         id: page.id,
@@ -73,7 +80,14 @@ export function createOrganizationRoutes(): Hono<CoreHonoEnv> {
         path: page.path,
         url: page.url,
       })),
-      cursor: result.nextCursor === null ? null : encodeCursor(result.nextCursor),
+      cursor:
+        result.nextCursor === null
+          ? null
+          : await encodeCursor(
+              result.nextCursor,
+              tokenEncryptionKey,
+              cursorContext,
+            ),
     });
   });
 
