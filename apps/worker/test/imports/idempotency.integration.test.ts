@@ -4,6 +4,7 @@ import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  cleanupOrphanedImportArtifacts,
   createImportRoutes,
   reconcileQueuedImports,
 } from "../../src/imports/routes";
@@ -24,6 +25,7 @@ const identity: AuthenticatedIdentity = {
 describe("POST /imports idempotency", () => {
   beforeEach(async () => {
     await env.DB.batch([
+      env.DB.prepare("DELETE FROM portable_maintenance_state"),
       env.DB.prepare("DELETE FROM import_request_idempotency"),
       env.DB.prepare("DELETE FROM imports"),
       env.DB.prepare("DELETE FROM users"),
@@ -44,6 +46,16 @@ describe("POST /imports idempotency", () => {
         new Date().toISOString(),
       ),
     ]);
+    let listing: R2Objects;
+    do {
+      listing = await env.FILES.list({
+        prefix: `imports/${identity.workspaceId}/`,
+        limit: 1_000,
+      });
+      if (listing.objects.length > 0) {
+        await env.FILES.delete(listing.objects.map((object) => object.key));
+      }
+    } while (listing.truncated || listing.objects.length > 0);
   });
 
   it("replays the existing job and rejects a mismatched payload", async () => {
@@ -289,5 +301,114 @@ describe("POST /imports idempotency", () => {
     expect(response.status).toBe(200);
     expect(sourceKey).toBeDefined();
     expect(await env.FILES.head(sourceKey ?? "")).not.toBeNull();
+  });
+
+  it("sweeps only aged import prefixes that have no durable D1 intent", async () => {
+    const orphanPrefix = `imports/${identity.workspaceId}/orphaned-import/`;
+    const timestamp = "2026-08-23T00:00:00.000Z";
+    const liveIds = Array.from(
+      { length: 100 },
+      (_, index) => `live-${String(index).padStart(3, "0")}`,
+    );
+    await env.DB.batch(
+      liveIds.map((id) =>
+        env.DB.prepare(
+          `INSERT INTO imports (
+             id, workspace_id, user_id, source_type, source_metadata_json,
+             workflow_source_json, status, created_at, updated_at
+           ) VALUES (?1, ?2, ?3, 'paste', '{}', NULL, 'running', ?4, ?4)`,
+        ).bind(id, identity.workspaceId, identity.id, timestamp),
+      ),
+    );
+    await Promise.all([
+      ...liveIds.map((id) =>
+        env.FILES.put(
+          `imports/${identity.workspaceId}/${id}/source/note.md`,
+          "live",
+        ),
+      ),
+      env.FILES.put(`${orphanPrefix}source/note.md`, "orphan"),
+    ]);
+
+    const removed = await cleanupOrphanedImportArtifacts(
+      env,
+      new Date(Date.now() + 25 * 60 * 60 * 1_000),
+    );
+
+    expect(removed).toBe(1);
+    expect((await env.FILES.list({ prefix: orphanPrefix })).objects).toEqual(
+      [],
+    );
+    expect(
+      await env.FILES.head(
+        `imports/${identity.workspaceId}/${liveIds[0] ?? ""}/source/note.md`,
+      ),
+    ).not.toBeNull();
+  });
+
+  it("carries the R2 cursor across bounded scan pages", async () => {
+    const timestamp = "2026-08-23T00:00:00.000Z";
+    const liveId = "cursor-live-import";
+    const orphanId = "cursor-orphan-import";
+    const liveKey = `imports/${identity.workspaceId}/${liveId}/source/note.md`;
+    const orphanKey = `imports/${identity.workspaceId}/${orphanId}/source/note.md`;
+    await env.DB.prepare(
+      `INSERT INTO imports (
+         id, workspace_id, user_id, source_type, source_metadata_json,
+         workflow_source_json, status, created_at, updated_at
+       ) VALUES (?1, ?2, ?3, 'paste', '{}', NULL, 'running', ?4, ?4)`,
+    )
+      .bind(liveId, identity.workspaceId, identity.id, timestamp)
+      .run();
+    await Promise.all([env.FILES.put(liveKey, "live"), env.FILES.put(orphanKey, "orphan")]);
+    const objects = await env.FILES.list({
+      prefix: `imports/${identity.workspaceId}/`,
+    });
+    const live = objects.objects.find((object) => object.key === liveKey);
+    const orphan = objects.objects.find((object) => object.key === orphanKey);
+    if (live === undefined || orphan === undefined) {
+      throw new Error("Missing cursor sweep fixtures");
+    }
+    const list = vi.fn(async (options: R2ListOptions) => {
+      if (options.prefix === "imports/") {
+        if (options.cursor === undefined) {
+          return { objects: [live], truncated: true, cursor: "cursor-page-2" };
+        }
+        if (options.cursor === "cursor-page-2") {
+          return { objects: [orphan], truncated: false };
+        }
+      }
+      if (options.prefix === `imports/${identity.workspaceId}/${orphanId}/`) {
+        return { objects: [orphan], truncated: false };
+      }
+      throw new Error(`Unexpected R2 list: ${JSON.stringify(options)}`);
+    });
+    const files = {
+      list,
+      delete: env.FILES.delete.bind(env.FILES),
+    } as unknown as R2Bucket;
+
+    const removed = await cleanupOrphanedImportArtifacts(
+      { DB: env.DB, FILES: files },
+      new Date(Date.now() + 25 * 60 * 60 * 1_000),
+    );
+
+    expect(removed).toBe(1);
+    expect(list.mock.calls.slice(0, 2).map(([options]) => options.cursor)).toEqual([
+      undefined,
+      "cursor-page-2",
+    ]);
+    expect(await env.FILES.head(orphanKey)).toBeNull();
+  });
+
+  it("leaves recent orphan artifacts inside the ambiguity grace period", async () => {
+    const prefix = `imports/${identity.workspaceId}/recent-orphan/`;
+    const key = `${prefix}source/note.md`;
+    await env.FILES.put(key, "recent");
+
+    const removed = await cleanupOrphanedImportArtifacts(env, new Date());
+
+    expect(removed).toBe(0);
+    expect(await env.FILES.head(key)).not.toBeNull();
   });
 });

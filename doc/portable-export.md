@@ -33,7 +33,8 @@ migration after validation.
 Worker invokes it for `0 18 * * 6` (Sunday 03:00 JST). It starts or resumes one
 idempotent `ExportWorkflow` per active workspace and backup date. Queued starts
 are reconciled every minute, and the daily cleanup trigger drains expired R2
-artifacts in bounded batches.
+artifacts in bounded batches. Import artifacts without a matching durable D1
+intent are swept only after a 24-hour ambiguity grace period.
 
 - The first weekly backup in each Japanese calendar month is the monthly
   representative and is retained for 12 calendar months.

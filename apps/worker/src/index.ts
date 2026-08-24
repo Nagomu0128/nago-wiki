@@ -26,6 +26,7 @@ import {
 } from "./exports/service";
 import {
   cleanupExpiredImports,
+  cleanupOrphanedImportArtifacts,
   createImportRoutes,
   reconcileQueuedImports,
 } from "./imports/routes";
@@ -174,6 +175,10 @@ export default {
       tasks.push({
         name: "expired import cleanup",
         promise: cleanupExpiredImports(environment),
+      });
+      tasks.push({
+        name: "orphaned import artifact cleanup",
+        promise: cleanupOrphanedImportArtifacts(environment),
       });
     }
     context.waitUntil(

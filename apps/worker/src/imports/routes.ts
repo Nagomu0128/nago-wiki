@@ -66,6 +66,11 @@ interface ExpiredImportRow {
 }
 
 const MAX_CLEANUP_IMPORTS_PER_RUN = 2_000;
+const MAX_ORPHAN_IMPORT_PREFIXES_PER_RUN = 100;
+const MAX_ORPHAN_OBJECTS_PER_PREFIX = 10_000;
+const MAX_ORPHAN_SCAN_PAGES_PER_RUN = 5;
+const IMPORT_ORPHAN_GRACE_MS = 24 * 60 * 60 * 1_000;
+const IMPORT_ORPHAN_SWEEP_TASK = "import-orphan-sweep";
 
 const googleStateSchema = z.object({
   userId: z.string(),
@@ -616,6 +621,126 @@ export async function cleanupExpiredImports(
     if (rows.results.length < limit) break;
   }
   return cleaned;
+}
+
+export async function cleanupOrphanedImportArtifacts(
+  environment: Pick<McpRuntimeEnv, "DB" | "FILES">,
+  now = new Date(),
+): Promise<number> {
+  const cutoff = now.getTime() - IMPORT_ORPHAN_GRACE_MS;
+  const state = await environment.DB.prepare(
+    "SELECT cursor FROM portable_maintenance_state WHERE task = ?1",
+  )
+    .bind(IMPORT_ORPHAN_SWEEP_TASK)
+    .first<{ cursor: string | null }>();
+  let cursor = state?.cursor ?? undefined;
+  let removed = 0;
+  for (let page = 0; page < MAX_ORPHAN_SCAN_PAGES_PER_RUN; page += 1) {
+    const pageCursor = cursor;
+    const listing = await environment.FILES.list({
+      prefix: "imports/",
+      limit: 1_000,
+      ...(cursor === undefined ? {} : { cursor }),
+    });
+    const candidates = new Map<
+      string,
+      { workspaceId: string; importId: string }
+    >();
+    for (const object of listing.objects) {
+      if (object.uploaded.getTime() > cutoff) continue;
+      const parsed = parseImportArtifactKey(object.key);
+      if (parsed !== null) candidates.set(parsed.prefix, parsed);
+    }
+    for (const [prefix, candidate] of candidates) {
+      const row = await environment.DB.prepare(
+        "SELECT id FROM imports WHERE id = ?1 AND workspace_id = ?2",
+      )
+        .bind(candidate.importId, candidate.workspaceId)
+        .first<{ id: string }>();
+      if (row !== null) continue;
+      const keys = await oldImportArtifactKeys(
+        environment.FILES,
+        prefix,
+        cutoff,
+      );
+      if (keys === null) continue;
+      for (let index = 0; index < keys.length; index += 1_000) {
+        await environment.FILES.delete(keys.slice(index, index + 1_000));
+      }
+      removed += 1;
+      if (removed >= MAX_ORPHAN_IMPORT_PREFIXES_PER_RUN) {
+        await storeMaintenanceCursor(environment.DB, pageCursor, now);
+        return removed;
+      }
+    }
+    cursor = listing.truncated ? listing.cursor : undefined;
+    await storeMaintenanceCursor(environment.DB, cursor, now);
+    if (cursor === undefined) break;
+  }
+  return removed;
+}
+
+async function storeMaintenanceCursor(
+  database: D1Database,
+  cursor: string | undefined,
+  now: Date,
+): Promise<void> {
+  await database
+    .prepare(
+      `INSERT INTO portable_maintenance_state (task, cursor, updated_at)
+       VALUES (?1, ?2, ?3)
+       ON CONFLICT(task) DO UPDATE
+         SET cursor = excluded.cursor, updated_at = excluded.updated_at`,
+    )
+    .bind(IMPORT_ORPHAN_SWEEP_TASK, cursor ?? null, now.toISOString())
+    .run();
+}
+
+function parseImportArtifactKey(
+  key: string,
+): { prefix: string; workspaceId: string; importId: string } | null {
+  const segments = key.split("/");
+  const workspaceId = segments[1];
+  const importId = segments[2];
+  if (
+    segments[0] !== "imports" ||
+    workspaceId === undefined ||
+    workspaceId.length === 0 ||
+    importId === undefined ||
+    importId.length === 0 ||
+    segments.length < 4
+  ) {
+    return null;
+  }
+  return {
+    prefix: `imports/${workspaceId}/${importId}/`,
+    workspaceId,
+    importId,
+  };
+}
+
+async function oldImportArtifactKeys(
+  bucket: R2Bucket,
+  prefix: string,
+  cutoff: number,
+): Promise<string[] | null> {
+  const keys: string[] = [];
+  let listing: R2Objects;
+  let cursor: string | undefined;
+  do {
+    listing = await bucket.list({
+      prefix,
+      limit: 1_000,
+      ...(cursor === undefined ? {} : { cursor }),
+    });
+    if (listing.objects.some((object) => object.uploaded.getTime() > cutoff)) {
+      return null;
+    }
+    keys.push(...listing.objects.map((object) => object.key));
+    if (keys.length > MAX_ORPHAN_OBJECTS_PER_PREFIX) return null;
+    cursor = listing.truncated ? listing.cursor : undefined;
+  } while (cursor !== undefined);
+  return keys;
 }
 
 async function deleteImportPrefix(
