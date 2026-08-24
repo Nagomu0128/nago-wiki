@@ -2,29 +2,39 @@ import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import { z } from "zod";
 
+import {
+  importWorkflowSourceSchema,
+  type ImportWorkflowSource,
+} from "./contracts";
+import { safeImportFilename } from "./filename";
 import { fetchGoogleDocument, googleRetryDelay } from "./google-client";
 import { googleDocumentToMarkdown } from "./google-docs-parser";
 import {
   importGoogleInlineImages,
   replaceGoogleInlineObjectLinks,
 } from "./google-inline-images";
+import { fetchPublicDocument } from "./public-url";
 import type { McpRuntimeEnv } from "../mcp/types";
 
-const importWorkflowParamsSchema = z.object({
+const MAX_SOURCE_BYTES = 20 * 1024 * 1024;
+const MAX_PREVIEW_BYTES = 1_048_576;
+
+export const importWorkflowParamsSchema = z.object({
   importId: z.string().min(1),
   workspaceId: z.string().min(1),
   requestedBy: z.string().min(1),
   targetPageId: z.uuid(),
-  source: z.object({
-    type: z.literal("google_docs"),
-    documentId: z.string().min(1).max(256),
-  }),
+  source: importWorkflowSourceSchema,
 });
 export type ImportWorkflowParams = z.infer<typeof importWorkflowParamsSchema>;
 
 interface SourceStepResult {
   sourceKey: string;
+  sourceType: ImportWorkflowSource["type"];
   title: string;
+  filename: string;
+  contentType: string;
+  resolvedSourceUrl: string | null;
 }
 
 interface PreviewStepResult {
@@ -32,6 +42,13 @@ interface PreviewStepResult {
   reportKey: string;
   title: string;
   warnings: number;
+}
+
+interface ConversionResult {
+  markdown: string;
+  title: string;
+  warnings: string[];
+  details: Record<string, unknown>;
 }
 
 export class ImportWorkflow extends WorkflowEntrypoint<
@@ -46,99 +63,81 @@ export class ImportWorkflow extends WorkflowEntrypoint<
     try {
       await step.do("mark import running", async () => {
         await this.env.DB.prepare(
-          `UPDATE imports SET status = 'running', updated_at = ?2 WHERE id = ?1`,
+          "UPDATE imports SET status = 'running', updated_at = ?2 WHERE id = ?1",
         )
           .bind(parameters.importId, new Date().toISOString())
           .run();
         return { status: "running" as const };
       });
 
-      const source = await step.do("fetch Google document", {
-        retries: {
-          limit: 5,
-          delay: ({ error }) => googleRetryDelay(error),
-          backoff: "exponential",
-        },
-        timeout: "5 minutes",
-      }, async () => {
-        const document = await fetchGoogleDocument(
-          this.env,
-          parameters.requestedBy,
-          parameters.source.documentId,
-        );
-        const raw = JSON.stringify(document);
-        if (new TextEncoder().encode(raw).byteLength > 20 * 1024 * 1024) {
-          throw new Error("Google document exceeds the 20 MiB import limit");
-        }
-        const title = documentTitle(document);
-        const sourceKey = `imports/${parameters.workspaceId}/${parameters.importId}/source/document.json`;
-        await this.env.FILES.put(sourceKey, raw, {
-          httpMetadata: { contentType: "application/json; charset=utf-8" },
-          customMetadata: {
-            import_id: parameters.importId,
-            source_type: "google_docs",
+      const source = await step.do(
+        "materialize import source",
+        {
+          retries: {
+            limit: 5,
+            delay: ({ error }) => googleRetryDelay(error),
+            backoff: "exponential",
           },
-        });
-        return { sourceKey, title } satisfies SourceStepResult;
-      });
-
-      const preview = await step.do("convert document preview", {
-        retries: {
-          limit: 5,
-          delay: ({ error }) => googleRetryDelay(error),
-          backoff: "exponential",
+          timeout: "5 minutes",
         },
-        timeout: "10 minutes",
-      }, async () => {
-        const object = await this.env.FILES.get(source.sourceKey);
-        if (object === null || object.size > 20 * 1024 * 1024) {
-          throw new Error("Stored import source was not found");
-        }
-        const conversion = googleDocumentToMarkdown(await object.json());
-        const imageImport = await importGoogleInlineImages({
-          files: this.env.FILES,
-          workspaceId: parameters.workspaceId,
-          importId: parameters.importId,
-          targetPageId: parameters.targetPageId,
-          images: conversion.inlineImages,
-        });
-        const warnings = boundedGoogleWarnings([
-          ...conversion.warnings,
-          ...imageImport.warnings,
-        ]);
-        const markdown = replaceGoogleInlineObjectLinks(
-          conversion.markdown,
-          conversion.inlineObjectIds,
-          imageImport.assets,
-        );
-        assertGooglePreviewSize(markdown);
-        const previewKey = `imports/${parameters.workspaceId}/${parameters.importId}/preview.md`;
-        const reportKey = `imports/${parameters.workspaceId}/${parameters.importId}/report.json`;
-        await Promise.all([
-          this.env.FILES.put(previewKey, markdown, {
-            httpMetadata: { contentType: "text/markdown; charset=utf-8" },
-          }),
-          this.env.FILES.put(
-            reportKey,
-            JSON.stringify({
-              title: conversion.title,
-              inlineObjectIds: conversion.inlineObjectIds,
-              assets: imageImport.assets,
-              warnings,
+        async () => materializeSource(this.env, parameters),
+      );
+
+      const preview = await step.do(
+        "convert document preview",
+        {
+          retries: {
+            limit: 5,
+            delay: ({ error }) => googleRetryDelay(error),
+            backoff: "exponential",
+          },
+          timeout: "10 minutes",
+        },
+        async () => {
+          const object = await this.env.FILES.get(source.sourceKey);
+          if (object === null || object.size > MAX_SOURCE_BYTES) {
+            throw new Error("Stored import source is unavailable or too large");
+          }
+          const conversion = await convertSource(
+            this.env,
+            parameters,
+            object,
+            source,
+          );
+          assertImportPreviewSize(conversion.markdown);
+          const previewKey = `imports/${parameters.workspaceId}/${parameters.importId}/preview.md`;
+          const reportKey = `imports/${parameters.workspaceId}/${parameters.importId}/report.json`;
+          await Promise.all([
+            this.env.FILES.put(previewKey, conversion.markdown, {
+              httpMetadata: { contentType: "text/markdown; charset=utf-8" },
             }),
-            { httpMetadata: { contentType: "application/json; charset=utf-8" } },
-          ),
-        ]);
-        return {
-          previewKey,
-          reportKey,
-          title: conversion.title || source.title,
-          warnings: warnings.length,
-        } satisfies PreviewStepResult;
-      });
+            this.env.FILES.put(
+              reportKey,
+              JSON.stringify({
+                title: conversion.title,
+                sourceType: source.sourceType,
+                resolvedSourceUrl: source.resolvedSourceUrl,
+                warnings: conversion.warnings,
+                ...conversion.details,
+              }),
+              {
+                httpMetadata: { contentType: "application/json; charset=utf-8" },
+              },
+            ),
+          ]);
+          return {
+            previewKey,
+            reportKey,
+            title: conversion.title || source.title,
+            warnings: conversion.warnings.length,
+          } satisfies PreviewStepResult;
+        },
+      );
 
       await step.do("publish import preview", async () => {
-        const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1_000).toISOString();
+        const expiresAt = new Date(
+          Date.now() + 7 * 24 * 60 * 60 * 1_000,
+        ).toISOString();
         await this.env.DB.prepare(
           `UPDATE imports
               SET status = 'preview_ready',
@@ -148,10 +147,11 @@ export class ImportWorkflow extends WorkflowEntrypoint<
                     '$.sourceKey', ?3,
                     '$.previewKey', ?4,
                     '$.title', ?5,
-                    '$.warningCount', ?6
+                    '$.warningCount', ?6,
+                    '$.resolvedSourceUrl', ?7
                   ),
-                  expires_at = ?7,
-                  updated_at = ?8
+                  expires_at = ?8,
+                  updated_at = ?9
             WHERE id = ?1`,
         )
           .bind(
@@ -161,6 +161,7 @@ export class ImportWorkflow extends WorkflowEntrypoint<
             preview.previewKey,
             preview.title,
             preview.warnings,
+            source.resolvedSourceUrl,
             expiresAt,
             new Date().toISOString(),
           )
@@ -170,17 +171,19 @@ export class ImportWorkflow extends WorkflowEntrypoint<
       return preview;
     } catch (error) {
       await step.do("mark import failed", async () => {
+        const failedAt = new Date();
         await this.env.DB.prepare(
           `UPDATE imports
               SET status = 'failed',
                   source_metadata_json = json_set(source_metadata_json, '$.error', ?2),
-                  updated_at = ?3
+                  updated_at = ?3, expires_at = ?4
             WHERE id = ?1`,
         )
           .bind(
             parameters.importId,
             publicErrorMessage(error),
-            new Date().toISOString(),
+            failedAt.toISOString(),
+            new Date(failedAt.getTime() + 7 * 24 * 60 * 60 * 1_000).toISOString(),
           )
           .run();
         return { status: "failed" as const };
@@ -190,11 +193,157 @@ export class ImportWorkflow extends WorkflowEntrypoint<
   }
 }
 
+async function materializeSource(
+  environment: McpRuntimeEnv,
+  parameters: ImportWorkflowParams,
+): Promise<SourceStepResult> {
+  const source = parameters.source;
+  if (source.type === "google_docs") {
+    const document = await fetchGoogleDocument(
+      environment,
+      parameters.requestedBy,
+      source.documentId,
+    );
+    const raw = JSON.stringify(document);
+    if (new TextEncoder().encode(raw).byteLength > MAX_SOURCE_BYTES) {
+      throw new Error("Google document exceeds the 20 MiB import limit");
+    }
+    const title = documentTitle(document);
+    const sourceKey = `imports/${parameters.workspaceId}/${parameters.importId}/source/document.json`;
+    await environment.FILES.put(sourceKey, raw, {
+      httpMetadata: { contentType: "application/json; charset=utf-8" },
+      customMetadata: {
+        import_id: parameters.importId,
+        source_type: source.type,
+      },
+    });
+    return {
+      sourceKey,
+      sourceType: source.type,
+      title,
+      filename: "document.json",
+      contentType: "application/json",
+      resolvedSourceUrl: null,
+    };
+  }
+  if (source.type === "public_url") {
+    const fetched = await fetchPublicDocument(source.sourceUrl);
+    const sourceKey = `imports/${parameters.workspaceId}/${parameters.importId}/source/${safeImportFilename(fetched.filename)}`;
+    await environment.FILES.put(sourceKey, fetched.bytes, {
+      httpMetadata: { contentType: fetched.contentType },
+      customMetadata: {
+        import_id: parameters.importId,
+        source_type: source.type,
+      },
+    });
+    return {
+      sourceKey,
+      sourceType: source.type,
+      title: titleFromFilename(fetched.filename),
+      filename: fetched.filename,
+      contentType: fetched.contentType,
+      resolvedSourceUrl: fetched.finalUrl,
+    };
+  }
+  const expectedPrefix = `imports/${parameters.workspaceId}/${parameters.importId}/`;
+  if (!source.sourceKey.startsWith(expectedPrefix)) {
+    throw new Error("Stored import source key does not belong to this import");
+  }
+  const object = await environment.FILES.head(source.sourceKey);
+  if (object === null || object.size > MAX_SOURCE_BYTES) {
+    throw new Error("Stored import source is unavailable or too large");
+  }
+  return {
+    sourceKey: source.sourceKey,
+    sourceType: source.type,
+    title: titleFromFilename(source.filename),
+    filename: source.filename,
+    contentType: source.contentType,
+    resolvedSourceUrl: null,
+  };
+}
+
+async function convertSource(
+  environment: McpRuntimeEnv,
+  parameters: ImportWorkflowParams,
+  object: R2ObjectBody,
+  source: SourceStepResult,
+): Promise<ConversionResult> {
+  if (source.sourceType === "google_docs") {
+    const conversion = googleDocumentToMarkdown(await object.json());
+    const imageImport = await importGoogleInlineImages({
+      files: environment.FILES,
+      workspaceId: parameters.workspaceId,
+      importId: parameters.importId,
+      targetPageId: parameters.targetPageId,
+      images: conversion.inlineImages,
+    });
+    const warnings = boundedGoogleWarnings([
+      ...conversion.warnings,
+      ...imageImport.warnings,
+    ]);
+    const markdown = replaceGoogleInlineObjectLinks(
+      conversion.markdown,
+      conversion.inlineObjectIds,
+      imageImport.assets,
+    );
+    return {
+      markdown,
+      title: conversion.title || source.title,
+      warnings,
+      details: {
+        inlineObjectIds: conversion.inlineObjectIds,
+        assets: imageImport.assets,
+      },
+    };
+  }
+  const normalizedType = source.contentType
+    .split(";", 1)[0]
+    ?.trim()
+    .toLowerCase();
+  if (normalizedType === "text/markdown" || normalizedType === "text/plain") {
+    return {
+      markdown: await object.text(),
+      title: source.title,
+      warnings: [],
+      details: {},
+    };
+  }
+  if (normalizedType !== "application/pdf" && normalizedType !== "text/html") {
+    throw new Error("Import source content type is not supported");
+  }
+  const result = await environment.AI.toMarkdown({
+    name: source.filename,
+    blob: await object.blob(),
+  });
+  if (result.format === "error") {
+    throw new Error(`Markdown conversion failed: ${result.error}`);
+  }
+  return {
+    markdown: result.data,
+    title: source.title,
+    warnings: [],
+    details: {
+      detectedMimeType: result.mimeType,
+      estimatedTokens: result.tokens,
+    },
+  };
+}
+
 function documentTitle(document: unknown): string {
   if (typeof document !== "object" || document === null || !("title" in document)) {
     return "Imported Google Document";
   }
-  return typeof document.title === "string" ? document.title : "Imported Google Document";
+  return typeof document.title === "string"
+    ? document.title
+    : "Imported Google Document";
+}
+
+function titleFromFilename(filename: string): string {
+  const withoutExtension = filename.replace(/\.[^.]+$/u, "").trim();
+  return withoutExtension.length > 0
+    ? withoutExtension.slice(0, 500)
+    : "Imported Document";
 }
 
 function publicErrorMessage(error: unknown): string {
@@ -205,7 +354,9 @@ function publicErrorMessage(error: unknown): string {
 export function boundedGoogleWarnings(values: string[]): string[] {
   const unique = new Set<string>();
   for (const value of values) {
-    const warning = value.replace(/https?:\/\/\S+/giu, "[redacted URL]").slice(0, 1_000);
+    const warning = value
+      .replace(/https?:\/\/\S+/giu, "[redacted URL]")
+      .slice(0, 1_000);
     if (warning.length > 0) unique.add(warning);
     if (unique.size === 100) break;
   }
@@ -213,7 +364,11 @@ export function boundedGoogleWarnings(values: string[]): string[] {
 }
 
 export function assertGooglePreviewSize(markdown: string): void {
-  if (new TextEncoder().encode(markdown).byteLength > 1_048_576) {
-    throw new Error("Converted Google document exceeds the 1 MiB page limit");
+  assertImportPreviewSize(markdown);
+}
+
+function assertImportPreviewSize(markdown: string): void {
+  if (new TextEncoder().encode(markdown).byteLength > MAX_PREVIEW_BYTES) {
+    throw new Error("Converted document exceeds the 1 MiB page limit");
   }
 }
