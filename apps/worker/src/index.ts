@@ -17,6 +17,14 @@ import { createRealtimeWikiCoreService } from "./core/realtime-mutations";
 import { D1WikiRepository } from "./core/repository";
 import { consumeAsyncJobs } from "./jobs/consumer";
 import { reconcilePendingJobs } from "./jobs/reconcile";
+import { createExportRoutes } from "./exports/routes";
+import {
+  cleanupExpiredPortableExports,
+  PORTABLE_EXPORT_CLEANUP_CRON,
+  reconcileQueuedPortableExports,
+  runWeeklyBackupMaintenance,
+  WEEKLY_BACKUP_CRON,
+} from "./exports/service";
 import { createImportRoutes } from "./imports/routes";
 import { cleanupExpiredImports } from "./imports/cleanup";
 import { createMcpOAuthProvider } from "./mcp/oauth";
@@ -30,6 +38,7 @@ import { createPagesRoutes } from "./routes/pages";
 import { createSessionRoutes } from "./routes/session";
 
 export { DiscordGatewayContainer, PageRoom };
+export { ExportWorkflow } from "./exports/workflow";
 export { ImportWorkflow } from "./imports/workflow";
 
 const app = new Hono<CoreHonoEnv>();
@@ -84,6 +93,7 @@ app.route("/api/v1", createOrganizationRoutes());
 app.route("/api/v1", createAssetRoutes());
 app.route("/api/v1", createAiRoutes());
 app.route("/api/v1", createImportRoutes());
+app.route("/api/v1", createExportRoutes());
 app.route("/api/v1", createBotRoutes());
 
 app.get("/api/v1/health", (context) =>
@@ -116,13 +126,43 @@ export default {
     return app.fetch(request, environment, context);
   },
   queue: consumeAsyncJobs,
-  scheduled(_controller, environment, context) {
+  scheduled(controller, environment, context) {
+    const tasks: { name: string; promise: Promise<unknown> }[] = [
+      { name: "job reconciliation", promise: reconcilePendingJobs(environment) },
+      {
+        name: "export Workflow reconciliation",
+        promise: reconcileQueuedPortableExports(environment),
+      },
+      { name: "expired import cleanup", promise: cleanupExpiredImports(environment) },
+      {
+        name: "Discord gateway",
+        promise: environment.DISCORD_GATEWAY.getByName("gateway").start(),
+      },
+    ];
+    if (controller.cron === WEEKLY_BACKUP_CRON) {
+      tasks.push({
+        name: "weekly portable backup",
+        promise: runWeeklyBackupMaintenance(environment),
+      });
+    } else if (controller.cron === PORTABLE_EXPORT_CLEANUP_CRON) {
+      tasks.push({
+        name: "portable export cleanup",
+        promise: cleanupExpiredPortableExports(environment),
+      });
+    }
     context.waitUntil(
-      Promise.all([
-        reconcilePendingJobs(environment),
-        cleanupExpiredImports(environment),
-        environment.DISCORD_GATEWAY.getByName("gateway").start(),
-      ]).then(() => undefined),
+      Promise.allSettled(tasks.map((task) => task.promise)).then((results) => {
+        for (const [index, result] of results.entries()) {
+          if (result.status === "rejected") {
+            console.error(`Scheduled ${tasks[index]?.name ?? "task"} failed`, {
+              error:
+                result.reason instanceof Error
+                  ? result.reason.message
+                  : "Unknown error",
+            });
+          }
+        }
+      }),
     );
   },
 } satisfies ExportedHandler<McpRuntimeEnv>;

@@ -11,5 +11,7 @@ export const accessProtectedApiPaths = [
   "/api/v1/imports/:id/apply",
   "/api/v1/imports/google/authorize",
   "/api/v1/imports/google/picker-config",
+  "/api/v1/exports",
+  "/api/v1/exports/*",
   "/api/v1/account-links",
 ] as const;
