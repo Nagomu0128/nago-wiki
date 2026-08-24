@@ -195,9 +195,13 @@ export class HttpWikiApi implements WikiApi {
   createImport(input: ImportRequest, signal?: AbortSignal) {
     return this.request<ImportJob>("/imports", {
       method: "POST",
-      body: JSON.stringify({
-        source: { type: input.sourceType, documentId: input.documentId },
-      }),
+      // Keep the deployed Google Web payload stable while portable sources
+      // use the canonical flat request contract.
+      body: JSON.stringify(
+        input.sourceType === "google_docs"
+          ? { source: { type: input.sourceType, documentId: input.documentId } }
+          : input,
+      ),
       headers: { "Idempotency-Key": crypto.randomUUID() },
       signal: signal ?? null,
     });

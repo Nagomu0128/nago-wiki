@@ -148,10 +148,12 @@ export interface AnswerResponse {
 export type ImportSourceType = "google_docs" | "markdown" | "pdf" | "url" | "paste";
 export type ImportStatus = "queued" | "running" | "preview_ready" | "applied" | "failed";
 
-export interface ImportRequest {
-  sourceType: "google_docs";
-  documentId: string;
-}
+export type ImportRequest =
+  | { sourceType: "google_docs"; documentId: string }
+  | { sourceType: "markdown"; filename: string; content: string }
+  | { sourceType: "pdf"; filename: string; content: string }
+  | { sourceType: "url"; sourceUrl: string }
+  | { sourceType: "paste"; filename?: string; content: string };
 
 export interface ImportJob {
   id: string;

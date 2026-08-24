@@ -42,5 +42,32 @@ describe("HttpWikiApi", () => {
     expect(fetchMock.mock.calls[0]?.[1]?.body).toBe(JSON.stringify({
       source: { type: "google_docs", documentId: "document-1" },
     }));
+    expect(new Headers(fetchMock.mock.calls[0]?.[1]?.headers).get("Idempotency-Key"))
+      .toEqual(expect.any(String));
+  });
+
+  it("sends portable imports with the canonical flat payload", async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(Response.json({
+      id: "import-2",
+      sourceType: "paste",
+      sourceLabel: "memo.txt",
+      status: "queued",
+      warnings: [],
+      createdAt: "2026-08-23T00:00:00.000Z",
+    }, { status: 202 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = new HttpWikiApi("https://wiki.example/api/v1");
+
+    await api.createImport({
+      sourceType: "paste",
+      filename: "memo.txt",
+      content: "portable memo",
+    });
+
+    expect(fetchMock.mock.calls[0]?.[1]?.body).toBe(JSON.stringify({
+      sourceType: "paste",
+      filename: "memo.txt",
+      content: "portable memo",
+    }));
   });
 });
