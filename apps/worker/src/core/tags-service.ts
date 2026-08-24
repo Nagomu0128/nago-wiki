@@ -61,6 +61,26 @@ export class TagsService {
     if (!canEdit(await this.authorization.effectivePermission(identity, pageId))) {
       throw new ApiProblem("FORBIDDEN", 403, "Editor permission is required");
     }
+    return this.replaceStoredPageTags(identity.workspaceId, pageId, names);
+  }
+
+  public async replaceImportedPageTags(
+    workspaceId: string,
+    pageId: string,
+    names: string[],
+  ): Promise<WikiTag[]> {
+    const page = await this.repository.getPage(pageId);
+    if (page?.workspaceId !== workspaceId || page.status !== "active") {
+      throw new ApiProblem("PAGE_NOT_FOUND", 404, "Page was not found or is not visible");
+    }
+    return this.replaceStoredPageTags(workspaceId, pageId, names);
+  }
+
+  private async replaceStoredPageTags(
+    workspaceId: string,
+    pageId: string,
+    names: string[],
+  ): Promise<WikiTag[]> {
     const normalized = new Map<string, string>();
     for (const name of names) {
       const trimmed = name.trim();
@@ -76,7 +96,7 @@ export class TagsService {
                (id, workspace_id, name, normalized_name, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5)`,
           )
-          .bind(createUuidV7(), identity.workspaceId, name, key, now),
+          .bind(createUuidV7(), workspaceId, name, key, now),
       ),
       this.database.prepare(`DELETE FROM page_tags WHERE page_id = ?1`).bind(pageId),
       ...[...normalized.keys()].map((key) =>
@@ -86,7 +106,7 @@ export class TagsService {
              SELECT ?1, id FROM tags
               WHERE workspace_id = ?2 AND normalized_name = ?3`,
           )
-          .bind(pageId, identity.workspaceId, key),
+          .bind(pageId, workspaceId, key),
       ),
     ]);
     return this.repository.getTagsForPage(pageId);

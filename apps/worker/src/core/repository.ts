@@ -140,6 +140,11 @@ export interface PageCreationIdempotency {
   expiresAt: string;
 }
 
+export interface ImportApplicationReservation {
+  importId: string;
+  acceptedTags: string[];
+}
+
 export class D1WikiRepository {
   public constructor(private readonly database: D1Database) {}
 
@@ -372,6 +377,7 @@ export class D1WikiRepository {
     version: PageVersionStorageRecord,
     restrictedCreatorPermission: "editor" | null,
     idempotency?: PageCreationIdempotency,
+    importApplication?: ImportApplicationReservation,
   ): Promise<void> {
     const statements: D1PreparedStatement[] = [
       this.database
@@ -447,6 +453,35 @@ export class D1WikiRepository {
           ),
       );
     }
+    if (importApplication !== undefined) {
+      statements.push(
+        this.database
+          .prepare(
+            `INSERT INTO import_applications
+               (import_id, page_id, accepted_tags_json, status, created_at, updated_at)
+             VALUES (
+               ?1,
+               ?2,
+               CASE WHEN EXISTS (
+                 SELECT 1 FROM imports
+                  WHERE id = ?1 AND workspace_id = ?5 AND user_id = ?6
+                    AND status = 'preview_ready'
+               ) THEN ?3 ELSE NULL END,
+               'applying',
+               ?4,
+               ?4
+             )`,
+          )
+          .bind(
+            importApplication.importId,
+            page.id,
+            JSON.stringify(importApplication.acceptedTags),
+            page.createdAt,
+            page.workspaceId,
+            page.createdBy,
+          ),
+      );
+    }
 
     try {
       await this.database.batch(statements);
@@ -462,6 +497,13 @@ export class D1WikiRepository {
         if (activeParent === null) throw pageNotFound();
       }
       if (isD1UniqueConstraintError(error)) {
+        if (error instanceof Error && /import_applications/i.test(error.message)) {
+          throw new ApiProblem(
+            "IDEMPOTENCY_CONFLICT",
+            409,
+            "This import is already being applied",
+          );
+        }
         if (
           error instanceof Error &&
           /page_create_idempotency/i.test(error.message)

@@ -632,10 +632,60 @@ describe("D1 wiki core", () => {
       "import:one",
     )).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT", status: 409 });
   });
+
+  it("atomically reserves a non-expiring import-to-page mapping", async () => {
+    const importId = crypto.randomUUID();
+    const now = new Date().toISOString();
+    await env.DB.prepare(
+      `INSERT INTO imports
+         (id, workspace_id, user_id, source_type, source_metadata_json, status,
+          created_at, updated_at, expires_at)
+       VALUES (?1, ?2, ?3, 'google_docs', '{}', 'preview_ready', ?4, ?4, ?5)`,
+    )
+      .bind(importId, DEFAULT_WORKSPACE_ID, editor.id, now, "2026-09-01T00:00:00.000Z")
+      .run();
+    const pageId = createUuidV7();
+    await service.createImportedPageWithId(editor, pageId, {
+      parentId: null,
+      title: "Durable imported page",
+      bodyMd: "imported",
+      accessMode: "workspace",
+    }, {
+      importId,
+      acceptedTags: ["Durable"],
+    });
+
+    await env.DB.prepare("DELETE FROM page_create_idempotency").run();
+    await expect(env.DB.prepare(
+      `SELECT page_id, accepted_tags_json, status
+         FROM import_applications WHERE import_id = ?1`,
+    ).bind(importId).first()).resolves.toMatchObject({
+      page_id: pageId,
+      accepted_tags_json: '["Durable"]',
+      status: "applying",
+    });
+
+    const replayPageId = createUuidV7();
+    await service.trashPage(editor, pageId);
+    await expect(service.createImportedPageWithId(editor, replayPageId, {
+      parentId: null,
+      title: "Must not replay a trashed import",
+      bodyMd: "duplicate",
+      accessMode: "workspace",
+    }, {
+      importId,
+      acceptedTags: [],
+    })).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT", status: 409 });
+    await expect(env.DB.prepare(
+      "SELECT id FROM pages WHERE id = ?1",
+    ).bind(replayPageId).first()).resolves.toBeNull();
+  });
 });
 
 async function resetDatabase(): Promise<void> {
   await env.DB.exec(`
+    DELETE FROM import_cleanup;
+    DELETE FROM import_applications;
     DELETE FROM mentions;
     DELETE FROM comments;
     DELETE FROM page_version_outbox;
