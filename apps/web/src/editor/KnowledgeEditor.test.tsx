@@ -5,7 +5,7 @@ import { act } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { RevisionConflictFailure, type PageResource, type WikiApi } from "../api";
 import type { RealtimeProviderFactory } from "../realtime";
-import { renderView, setInputValue, type RenderedView } from "../test/render";
+import { flushUi, renderView, setInputValue, type RenderedView } from "../test/render";
 import { KnowledgeEditor, type CrepeSurfaceProps, type EditorSurfaceHandle } from "./KnowledgeEditor";
 
 const resource: PageResource = {
@@ -173,5 +173,52 @@ describe("KnowledgeEditor", () => {
 
     expect(onMoved).toHaveBeenCalledWith(moved);
     expect(onTrashed).toHaveBeenCalledWith([resource.page.id]);
+  });
+
+  it("creates a page from a broken Wiki link and inserts the resolved link", async () => {
+    const created: PageResource = {
+      ...resource,
+      page: {
+        ...resource.page,
+        id: "30000000-0000-4000-8000-000000000099",
+        slug: "new-note",
+        title: "New note",
+      },
+    };
+    const createPage = vi.fn(() => Promise.resolve(created));
+    const onPageCreated = vi.fn();
+    const api = {
+      ...apiWithUpdate(vi.fn(() => Promise.resolve(resource))),
+      createPage,
+    } as unknown as WikiApi;
+    view = await renderView(
+      <KnowledgeEditor
+        api={api}
+        onPageCreated={onPageCreated}
+        realtimeFactory={realtimeFactory}
+        resource={resource}
+        suggestionProvider={{ search: () => Promise.resolve([]) }}
+        surfaceComponent={TestSurface}
+      />,
+    );
+    act(() => {
+      [...view?.container.querySelectorAll("button") ?? []]
+        .find((button) => button.textContent === "Markdown")?.click();
+    });
+    const source = view.container.querySelector<HTMLTextAreaElement>("[aria-label='Markdownソース']");
+    if (!source) throw new Error("Markdown source was not rendered");
+    source.focus();
+    setInputValue(source, "See [[New note");
+    await flushUi();
+    const create = [...view.container.querySelectorAll<HTMLButtonElement>("[role='option']")]
+      .find((button) => button.textContent.includes("新規作成"));
+    if (!create) throw new Error("Broken-link create option was not rendered");
+
+    act(() => { create.click(); });
+    await flushUi();
+
+    expect(createPage).toHaveBeenCalledWith({ parentId: null, title: "New note" });
+    expect(onPageCreated).toHaveBeenCalledWith(created);
+    expect(source.value).toContain("[[New note]]");
   });
 });

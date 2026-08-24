@@ -3,6 +3,7 @@ import type {
   AnswerResponse,
   AccountLinkCode,
   ApplyImportInput,
+  BacklinkPage,
   CreatePageInput,
   ImportJob,
   ImportRequest,
@@ -13,8 +14,10 @@ import type {
   PageResource,
   PageTreeNode,
   PageVersion,
+  RecentPageItem,
   SearchRequest,
   UpdatePageInput,
+  WikiTag,
   WikiApi,
   WikiPage,
   BotProvider,
@@ -110,6 +113,8 @@ export class FixtureWikiApi implements WikiApi {
   private readonly pages = new Map(initialPages.map((resource) => [resource.page.id, clone(resource)]));
   private readonly comments = new Map<string, PageComment[]>();
   private readonly imports = new Map<string, ImportJob>();
+  private readonly favorites = new Map<string, string>();
+  private readonly recents = new Map<string, string>();
 
   async getMe(signal?: AbortSignal): Promise<MeResponse> {
     await abortableDelay(signal);
@@ -212,6 +217,84 @@ export class FixtureWikiApi implements WikiApi {
     resource.page.status = "active";
     resource.page.trashedAt = null;
     return clone(resource);
+  }
+
+  async getRecentPages(signal?: AbortSignal): Promise<RecentPageItem[]> {
+    await abortableDelay(signal);
+    return [...this.recents]
+      .sort((left, right) => right[1].localeCompare(left[1]))
+      .flatMap(([id, lastViewedAt]) => {
+        const resource = this.pages.get(id);
+        return resource?.page.status === "active"
+          ? [{ ...navigationItem(resource), lastViewedAt }]
+          : [];
+      });
+  }
+
+  async getFavoritePages(signal?: AbortSignal) {
+    await abortableDelay(signal);
+    return [...this.favorites]
+      .sort((left, right) => right[1].localeCompare(left[1]))
+      .flatMap(([id, favoritedAt]) => {
+        const resource = this.pages.get(id);
+        return resource?.page.status === "active"
+          ? [{ ...navigationItem(resource), favoritedAt }]
+          : [];
+      });
+  }
+
+  async getTrashedPages(signal?: AbortSignal) {
+    await abortableDelay(signal);
+    return [...this.pages.values()]
+      .filter(({ page: item }) => {
+        if (item.status !== "trashed") return false;
+        const parent = item.parentId === null ? undefined : this.pages.get(item.parentId);
+        return parent?.page.status !== "trashed";
+      })
+      .map((resource) => ({
+        ...navigationItem(resource),
+        trashedAt: resource.page.trashedAt ?? resource.page.updatedAt,
+        restorable: true,
+      }));
+  }
+
+  async recordPageView(id: string, signal?: AbortSignal): Promise<void> {
+    await abortableDelay(signal);
+    const resource = this.pages.get(id);
+    if (resource?.page.status !== "active") throw new Error("Page is not visible");
+    this.recents.set(id, new Date().toISOString());
+  }
+
+  async setFavorite(id: string, favorite: boolean, signal?: AbortSignal) {
+    await abortableDelay(signal);
+    const resource = this.pages.get(id);
+    if (resource?.page.status !== "active") throw new Error("Page is not visible");
+    if (favorite) this.favorites.set(id, new Date().toISOString());
+    else this.favorites.delete(id);
+    return favorite;
+  }
+
+  async replacePageTags(id: string, names: string[], signal?: AbortSignal): Promise<WikiTag[]> {
+    await abortableDelay(signal);
+    const resource = this.pages.get(id);
+    if (!resource) throw new Error("Page is not visible");
+    resource.tags = [...new Set(names.map((name) => name.trim()).filter(Boolean))]
+      .map((name) => ({ id: crypto.randomUUID(), name }));
+    return clone(resource.tags);
+  }
+
+  async getBacklinks(id: string, signal?: AbortSignal): Promise<BacklinkPage[]> {
+    await abortableDelay(signal);
+    const target = this.pages.get(id);
+    if (!target) throw new Error("Page is not visible");
+    return [...this.pages.values()]
+      .filter(({ page: item }) => item.status === "active" && item.id !== id && item.bodyMd.includes(`[[${target.page.title}`))
+      .map(({ page: item }) => ({
+        id: item.id,
+        title: item.title,
+        path: `/${item.slug}`,
+        url: `/pages/${item.id}`,
+      }));
   }
 
   async getComments(pageId: string, signal?: AbortSignal): Promise<PageComment[]> {
@@ -363,4 +446,15 @@ export class FixtureWikiApi implements WikiApi {
       expiresAt: new Date(Date.now() + 10 * 60_000).toISOString(),
     };
   }
+}
+
+function navigationItem(resource: PageResource) {
+  return {
+    id: resource.page.id,
+    parentId: resource.page.parentId,
+    slug: resource.page.slug,
+    title: resource.page.title,
+    accessMode: resource.page.accessMode,
+    updatedAt: resource.page.updatedAt,
+  };
 }

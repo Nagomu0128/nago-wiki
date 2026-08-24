@@ -1,6 +1,9 @@
 export const accessProtectedApiPaths = [
   "/api/v1/tree",
   "/api/v1/tags",
+  "/api/v1/recent",
+  "/api/v1/favorites",
+  "/api/v1/trash",
   "/api/v1/me",
   "/api/v1/pages",
   "/api/v1/pages/*",

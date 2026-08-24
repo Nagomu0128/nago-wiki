@@ -2,6 +2,7 @@ import { z } from "zod";
 
 export * from "./auth";
 export * from "./errors";
+export * from "./knowledge-organization";
 export * from "./search";
 export * from "./wiki";
 export * from "./portable-import";
