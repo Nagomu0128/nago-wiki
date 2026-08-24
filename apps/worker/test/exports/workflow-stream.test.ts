@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   stageArchiveSegment,
+  safeAssetFilename,
   streamStagedRange,
   groupEntries,
   uploadArchivePart,
@@ -16,6 +17,13 @@ import { hashMarkdown } from "../../src/core/markdown";
 import type { McpRuntimeEnv } from "../../src/mcp/types";
 
 describe("portable export archive streaming", () => {
+  it("makes asset filenames portable after UTF-8 truncation", () => {
+    expect(safeAssetFilename(`${"a".repeat(199)}.b`)).toBe("a".repeat(199));
+    const astral = safeAssetFilename("😀".repeat(100));
+    expect(new TextEncoder().encode(astral).byteLength).toBeLessThanOrEqual(200);
+    expect(astral.includes("\ud83d")).toBe(true);
+    expect(safeAssetFilename("CON.txt")).toBe("asset");
+  });
   it("bounds metadata returned by each staging Workflow step", () => {
     const zip = planStoredZip(
       Array.from({ length: 1_001 }, (_, index) => ({

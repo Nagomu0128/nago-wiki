@@ -349,10 +349,19 @@ export function createImportRoutes(): Hono<ImportApi> {
           message: "Import preview is not ready",
         });
       }
-      if (
-        value.expires_at !== null &&
-        value.expires_at <= new Date().toISOString()
-      ) {
+      // Claim before reading/creating so expiry cleanup cannot delete the
+      // import between validation and the page transaction.
+      const claimed = await context.env.DB.prepare(
+        `UPDATE imports
+            SET expires_at = NULL,
+                source_metadata_json = json_set(source_metadata_json, '$.applying', 1),
+                updated_at = ?2
+          WHERE id = ?1 AND status = 'preview_ready'
+            AND (expires_at IS NULL OR expires_at > ?2)`,
+      )
+        .bind(importId, new Date().toISOString())
+        .run();
+      if (claimed.meta.changes !== 1) {
         throw new HTTPException(410, { message: "Import preview has expired" });
       }
       const previewKey =
@@ -390,7 +399,9 @@ export function createImportRoutes(): Hono<ImportApi> {
         context.env.DB.prepare(
           `UPDATE imports
               SET status = 'applied',
-                  source_metadata_json = json_set(source_metadata_json, '$.pageId', ?2),
+                  source_metadata_json = json_remove(
+                    json_set(source_metadata_json, '$.pageId', ?2), '$.applying'
+                  ),
                   updated_at = ?3
             WHERE id = ?1 AND status = 'preview_ready'`,
         ).bind(importId, page.page.id, appliedAt),

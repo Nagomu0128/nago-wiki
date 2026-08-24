@@ -1730,7 +1730,17 @@ export function safeAssetFilename(value: string): string {
     if (bytes.encode(result + character).byteLength > 200) break;
     result += character;
   }
-  return result || "asset";
+  const portable = result.replace(/[. ]+$/u, "");
+  const portableStem = portable.split(".")[0]?.toUpperCase();
+  if (
+    portable.length === 0 ||
+    portableStem === "CON" || portableStem === "PRN" ||
+    portableStem === "AUX" || portableStem === "NUL" ||
+    /^(COM|LPT)[1-9]$/u.test(portableStem ?? "")
+  ) {
+    return "asset";
+  }
+  return portable;
 }
 
 function nonEmpty(value: string | undefined): string | null {
