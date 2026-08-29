@@ -26,6 +26,22 @@ describe("portable import contracts", () => {
     ).toThrow();
   });
 
+  it("bounds buffered PDF and paste payloads", () => {
+    expect(() =>
+      createImportRequestSchema.parse({
+        sourceType: "pdf",
+        filename: "large.pdf",
+        content: "x".repeat(5 * 1024 * 1024 + 1),
+      }),
+    ).toThrow();
+    expect(() =>
+      createImportRequestSchema.parse({
+        sourceType: "paste",
+        content: "x".repeat(1 * 1024 * 1024 + 1),
+      }),
+    ).toThrow();
+  });
+
   it("keeps job and apply contracts aligned", () => {
     expect(
       importJobSchema.parse({

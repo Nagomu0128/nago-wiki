@@ -44,4 +44,49 @@ describe("readBoundedImportJson", () => {
       content: "memo",
     });
   });
+
+  it("accepts a request exactly at the byte limit", async () => {
+    const payload = '{"value":"near-limit"}';
+    const maxBytes = new TextEncoder().encode(payload).byteLength;
+    const request = new Request("https://wiki.example/imports", {
+      method: "POST",
+      body: payload,
+    });
+
+    await expect(readBoundedImportJson(request, maxBytes)).resolves.toEqual({
+      value: "near-limit",
+    });
+  });
+
+  it("decodes a multibyte UTF-8 character split across stream chunks", async () => {
+    const payload = new TextEncoder().encode('{"value":"猫"}');
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(payload.slice(0, 11));
+        controller.enqueue(payload.slice(11));
+        controller.close();
+      },
+    });
+    const request = new Request("https://wiki.example/imports", {
+      method: "POST",
+      body: stream,
+    });
+
+    await expect(readBoundedImportJson(request, payload.byteLength)).resolves.toEqual({
+      value: "猫",
+    });
+  });
+
+  it("rejects a request one byte over the streamed limit", async () => {
+    const payload = '{"value":"over-limit"}';
+    const byteLength = new TextEncoder().encode(payload).byteLength;
+    const request = new Request("https://wiki.example/imports", {
+      method: "POST",
+      body: payload,
+    });
+
+    await expect(readBoundedImportJson(request, byteLength - 1)).rejects.toMatchObject({
+      status: 413,
+    });
+  });
 });

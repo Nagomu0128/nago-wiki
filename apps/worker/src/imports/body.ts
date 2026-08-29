@@ -1,6 +1,8 @@
 import { HTTPException } from "hono/http-exception";
 
-export const MAX_IMPORT_REQUEST_BYTES = 30 * 1024 * 1024;
+// Keep buffered JSON well below a Worker isolate's shared 128 MiB memory limit.
+// Larger documents must use a streaming upload path rather than this endpoint.
+export const MAX_IMPORT_REQUEST_BYTES = 6 * 1024 * 1024;
 
 export async function readBoundedImportJson(
   request: Request,

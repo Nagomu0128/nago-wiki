@@ -31,7 +31,7 @@ export const createImportRequestSchema = z.discriminatedUnion("sourceType", [
     .object({
       sourceType: z.literal("pdf"),
       filename: filenameSchema,
-      content: z.string().min(1).max(28 * 1024 * 1024),
+      content: z.string().min(1).max(5 * 1024 * 1024),
     })
     .strict(),
   z
@@ -44,7 +44,7 @@ export const createImportRequestSchema = z.discriminatedUnion("sourceType", [
     .object({
       sourceType: z.literal("paste"),
       filename: filenameSchema.optional(),
-      content: z.string().min(1).max(5 * 1024 * 1024),
+      content: z.string().min(1).max(1 * 1024 * 1024),
     })
     .strict(),
 ]);
