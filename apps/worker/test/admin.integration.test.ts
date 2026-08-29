@@ -187,7 +187,7 @@ describe("owner administration", () => {
     const entries: { userId: string; permission: "viewer" }[] = [];
     for (let index = 0; index < 200; index += 1) {
       const id = `00000000-0000-7000-8000-${String(index + 100).padStart(12, "0")}`;
-      await insertUser(id, DEFAULT_WORKSPACE_ID, "viewer", `acl-${index}@example.com`);
+      await insertUser(id, DEFAULT_WORKSPACE_ID, "viewer", `acl-${String(index)}@example.com`);
       entries.push({ userId: id, permission: "viewer" });
     }
 
@@ -402,6 +402,65 @@ describe("owner administration", () => {
       `SELECT count(*) AS count FROM audit_events WHERE action = 'bot_channel.deleted'`,
     ).first<{ count: number }>();
     expect(deletedAudit?.count).toBe(1);
+  });
+
+  it("rechecks the owner in D1 before every administrative mutation", async () => {
+    await insertRestrictedPage();
+    const service = new AdminService(env.DB);
+    const members = await service.listMembers(owner);
+    const editable = members.find((member) => member.id === viewer.id);
+    if (editable === undefined) throw new Error("expected viewer");
+    await service.createBotChannel(owner, {
+      provider: "discord",
+      externalChannelId: "owner-gate-channel",
+      displayName: "Owner gate",
+      enabled: true,
+    });
+    await insertUser(
+      "00000000-0000-7000-8000-000000000015",
+      DEFAULT_WORKSPACE_ID,
+      "owner",
+      "remaining-owner@example.com",
+    );
+    await env.DB.prepare(`UPDATE users SET status = 'suspended' WHERE id = ?1`)
+      .bind(owner.id)
+      .run();
+
+    await expect(
+      service.updateMember(owner, viewer.id, {
+        role: "editor",
+        expectedUpdatedAt: editable.updatedAt,
+      }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN", status: 403 });
+    await expect(
+      service.replacePageAcl(owner, pageId, {
+        baseRevision: 0,
+        entries: [{ userId: viewer.id, permission: "viewer" }],
+      }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN", status: 403 });
+    await expect(service.setBotProviderEnabled(owner, "discord", false)).rejects.toMatchObject({
+      code: "FORBIDDEN",
+      status: 403,
+    });
+    await expect(
+      service.createBotChannel(owner, {
+        provider: "discord",
+        externalChannelId: "blocked-channel",
+        displayName: "Blocked",
+        enabled: true,
+      }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN", status: 403 });
+    await expect(
+      service.updateBotChannel(owner, "discord", "owner-gate-channel", { enabled: false }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN", status: 403 });
+    await expect(
+      service.deleteBotChannel(owner, "discord", "owner-gate-channel"),
+    ).rejects.toMatchObject({ code: "FORBIDDEN", status: 403 });
+
+    const audit = await env.DB.prepare(
+      `SELECT count(*) AS count FROM audit_events WHERE actor_id = ?1`,
+    ).bind(owner.id).first<{ count: number }>();
+    expect(audit?.count).toBe(1);
   });
 });
 

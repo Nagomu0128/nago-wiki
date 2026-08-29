@@ -156,25 +156,19 @@ export async function unlinkBotAccount(
   userId: string,
   provider: "discord" | "line",
 ): Promise<boolean> {
-  const existing = await database
-    .prepare(
-      `SELECT provider, external_subject, user_id, linked_at
-         FROM external_identities
-        WHERE user_id = ?1 AND provider = ?2`,
-    )
-    .bind(userId, provider)
-    .first<LinkedIdentityRow>();
-  if (existing === null) return false;
   const now = new Date().toISOString();
   const results = await database.batch([
     database
       .prepare(
         `INSERT INTO audit_events
-           (id, actor_id, action, target_type, target_id, metadata_json, created_at)
+         (id, actor_id, action, target_type, target_id, metadata_json, created_at)
          SELECT ?1, ?2, 'bot_identity.unlinked', 'user', ?2, ?3, ?4
-           FROM external_identities
-          WHERE user_id = ?2 AND provider = ?5
-            AND external_subject = ?6 AND linked_at = ?7`,
+           FROM users
+          WHERE id = ?2
+            AND EXISTS (
+              SELECT 1 FROM external_identities
+               WHERE user_id = ?2 AND provider = ?5
+            )`,
       )
       .bind(
         createUuidV7(),
@@ -182,18 +176,15 @@ export async function unlinkBotAccount(
         JSON.stringify({ provider }),
         now,
         provider,
-        existing.external_subject,
-        existing.linked_at,
       ),
     database
       .prepare(
         `DELETE FROM external_identities
-          WHERE user_id = ?1 AND provider = ?2
-            AND external_subject = ?3 AND linked_at = ?4`,
+          WHERE user_id = ?1 AND provider = ?2`,
       )
-      .bind(userId, provider, existing.external_subject, existing.linked_at),
+      .bind(userId, provider),
   ]);
-  return results[1]?.meta.changes === 1;
+  return (results[1]?.meta.changes ?? 0) > 0;
 }
 
 export async function resolveExternalUser(

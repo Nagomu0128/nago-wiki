@@ -14,7 +14,6 @@ import type {
 import { AuthorizationService } from "../core/authorization";
 import { ApiProblem, isD1UniqueConstraintError } from "../core/errors";
 import { D1WikiRepository, pageNotFound } from "../core/repository";
-import { createAuditEventStatement as auditEventStatement } from "../core/audit-events";
 import { createUuidV7 } from "../core/ids";
 
 interface MemberRow extends Record<string, unknown> {
@@ -110,6 +109,11 @@ export class AdminService {
           `UPDATE users
               SET role = ?1, status = ?2, updated_at = ?3
             WHERE id = ?4 AND workspace_id = ?5 AND updated_at = ?6
+              AND EXISTS (
+                SELECT 1 FROM users AS actor
+                 WHERE actor.id = ?7 AND actor.workspace_id = ?5
+                   AND actor.role = 'owner' AND actor.status = 'active'
+              )
               AND (
                 role <> 'owner' OR status <> 'active'
                 OR (?1 = 'owner' AND ?2 = 'active')
@@ -129,14 +133,21 @@ export class AdminService {
           memberId,
           identity.workspaceId,
           request.expectedUpdatedAt,
+          identity.id,
         ),
       this.database
         .prepare(
           `INSERT INTO audit_events
              (id, actor_id, action, target_type, target_id, metadata_json, created_at)
            SELECT ?1, ?2, 'member.updated', 'user', ?3, ?4, ?5
-             FROM users
-            WHERE id = ?3 AND workspace_id = ?6 AND updated_at = ?5`,
+            FROM users
+            WHERE id = ?3 AND workspace_id = ?6 AND updated_at = ?5
+              AND changes() = 1
+              AND EXISTS (
+                SELECT 1 FROM users AS actor
+                 WHERE actor.id = ?7 AND actor.workspace_id = ?6
+                   AND actor.role = 'owner' AND actor.status = 'active'
+              )`,
         )
         .bind(
           createUuidV7(),
@@ -145,6 +156,7 @@ export class AdminService {
           JSON.stringify(metadata),
           updatedAt,
           identity.workspaceId,
+          identity.id,
         ),
     ]);
     const updated = results[0]?.results[0];
@@ -153,6 +165,7 @@ export class AdminService {
       if (member !== null) return mapMember(member);
     }
 
+    await this.requireCurrentOwner(identity);
     const latest = await this.findMember(identity.workspaceId, memberId);
     if (latest === null) throw memberNotFound();
     if (latest.updated_at !== request.expectedUpdatedAt) {
@@ -218,18 +231,28 @@ export class AdminService {
         .prepare(
           `INSERT OR IGNORE INTO page_acl_revisions
              (page_id, revision, last_mutation_id, updated_by, updated_at)
-           VALUES (?1, 0, NULL, NULL, ?2)`,
+           SELECT ?1, 0, NULL, NULL, ?2
+            WHERE EXISTS (
+              SELECT 1 FROM users AS actor
+               WHERE actor.id = ?3 AND actor.workspace_id = ?4
+                 AND actor.role = 'owner' AND actor.status = 'active'
+            )`,
         )
-        .bind(pageId, page.createdAt),
+        .bind(pageId, page.createdAt, identity.id, identity.workspaceId),
       this.database
         .prepare(
           `UPDATE page_acl_revisions
               SET revision = revision + 1, last_mutation_id = ?1,
                   updated_by = ?2, updated_at = ?3
             WHERE page_id = ?4 AND revision = ?5
+              AND EXISTS (
+                SELECT 1 FROM users AS actor
+                 WHERE actor.id = ?6 AND actor.workspace_id = ?7
+                   AND actor.role = 'owner' AND actor.status = 'active'
+              )
           RETURNING revision`,
         )
-        .bind(mutationId, identity.id, now, pageId, request.baseRevision),
+        .bind(mutationId, identity.id, now, pageId, request.baseRevision, identity.id, identity.workspaceId),
       this.database
         .prepare(
           `DELETE FROM page_acl
@@ -237,9 +260,13 @@ export class AdminService {
               AND EXISTS (
                 SELECT 1 FROM page_acl_revisions
                  WHERE page_id = ?1 AND last_mutation_id = ?2
+              ) AND EXISTS (
+                SELECT 1 FROM users AS actor
+                 WHERE actor.id = ?3 AND actor.workspace_id = ?4
+                   AND actor.role = 'owner' AND actor.status = 'active'
               )`,
         )
-        .bind(pageId, mutationId),
+        .bind(pageId, mutationId, identity.id, identity.workspaceId),
     ];
     for (const entry of request.entries) {
       statements.push(
@@ -251,9 +278,13 @@ export class AdminService {
               WHERE EXISTS (
                 SELECT 1 FROM page_acl_revisions
                  WHERE page_id = ?1 AND last_mutation_id = ?5
+              ) AND EXISTS (
+                SELECT 1 FROM users AS actor
+                 WHERE actor.id = ?6 AND actor.workspace_id = ?7
+                   AND actor.role = 'owner' AND actor.status = 'active'
               )`,
           )
-          .bind(pageId, entry.userId, entry.permission, now, mutationId),
+          .bind(pageId, entry.userId, entry.permission, now, mutationId, identity.id, identity.workspaceId),
       );
     }
     statements.push(
@@ -263,7 +294,12 @@ export class AdminService {
              (id, actor_id, action, target_type, target_id, metadata_json, created_at)
            SELECT ?1, ?2, 'page_acl.replaced', 'page', ?3, ?4, ?5
              FROM page_acl_revisions
-            WHERE page_id = ?3 AND last_mutation_id = ?6`,
+            WHERE page_id = ?3 AND last_mutation_id = ?6
+              AND EXISTS (
+                SELECT 1 FROM users AS actor
+                 WHERE actor.id = ?7 AND actor.workspace_id = ?8
+                   AND actor.role = 'owner' AND actor.status = 'active'
+              )`,
         )
         .bind(
           createUuidV7(),
@@ -275,10 +311,13 @@ export class AdminService {
           }),
           now,
           mutationId,
+          identity.id,
+          identity.workspaceId,
         ),
     );
     const results = await this.database.batch(statements);
     if (results[1]?.meta.changes !== 1) {
+      await this.requireCurrentOwner(identity);
       const current = await this.getPageAcl(identity, pageId);
       throw new ApiProblem(
         "ACL_REVISION_CONFLICT",
@@ -333,30 +372,44 @@ export class AdminService {
     enabled: boolean,
   ): Promise<BotSettingsResponse> {
     requireOwner(identity);
-    const before = await this.getBotSettings(identity);
-    const previous = before.providers.find((entry) => entry.provider === provider)?.enabled ?? true;
     const now = new Date().toISOString();
-    await this.database.batch([
+    const results = await this.database.batch([
       this.database
         .prepare(
           `INSERT INTO workspace_bot_settings
              (workspace_id, provider, enabled, updated_by, updated_at)
-           VALUES (?1, ?2, ?3, ?4, ?5)
+           SELECT ?1, ?2, ?3, ?4, ?5
+            WHERE EXISTS (
+              SELECT 1 FROM users AS actor
+               WHERE actor.id = ?4 AND actor.workspace_id = ?1
+                 AND actor.role = 'owner' AND actor.status = 'active'
+            )
            ON CONFLICT(workspace_id, provider) DO UPDATE SET
              enabled = excluded.enabled,
              updated_by = excluded.updated_by,
              updated_at = excluded.updated_at`,
         )
         .bind(identity.workspaceId, provider, enabled ? 1 : 0, identity.id, now),
-      auditEventStatement(this.database, {
-        actorId: identity.id,
-        action: "bot_provider.updated",
-        targetType: "bot_provider",
-        targetId: provider,
-        metadata: { before: { enabled: previous }, after: { enabled } },
-        createdAt: now,
-      }),
+      this.database
+        .prepare(
+          `INSERT INTO audit_events
+             (id, actor_id, action, target_type, target_id, metadata_json, created_at)
+           SELECT ?1, ?2, 'bot_provider.updated', 'bot_provider', ?3, ?4, ?5
+             FROM users AS actor
+            WHERE actor.id = ?2 AND actor.workspace_id = ?6
+              AND actor.role = 'owner' AND actor.status = 'active'
+              AND changes() = 1`,
+        )
+        .bind(
+          createUuidV7(),
+          identity.id,
+          provider,
+          JSON.stringify({ after: { enabled } }),
+          now,
+          identity.workspaceId,
+        ),
     ]);
+    if (results[0]?.meta.changes !== 1) await this.requireCurrentOwner(identity);
     return this.getBotSettings(identity);
   }
 
@@ -367,13 +420,18 @@ export class AdminService {
     requireOwner(identity);
     const now = new Date().toISOString();
     try {
-      await this.database.batch([
+      const results = await this.database.batch([
         this.database
           .prepare(
             `INSERT INTO bot_channel_allowlist
                (workspace_id, provider, external_channel_id, display_name, enabled,
                 created_by, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)`,
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7
+              WHERE EXISTS (
+                SELECT 1 FROM users AS actor
+                 WHERE actor.id = ?6 AND actor.workspace_id = ?1
+                   AND actor.role = 'owner' AND actor.status = 'active'
+              )`,
           )
           .bind(
             identity.workspaceId,
@@ -384,19 +442,30 @@ export class AdminService {
             identity.id,
             now,
           ),
-        auditEventStatement(this.database, {
-          actorId: identity.id,
-          action: "bot_channel.created",
-          targetType: "bot_channel",
-          targetId: channelTarget(request.provider, request.externalChannelId),
-          metadata: {
-            provider: request.provider,
-            displayName: request.displayName,
-            enabled: request.enabled,
-          },
-          createdAt: now,
-        }),
+        this.database
+          .prepare(
+            `INSERT INTO audit_events
+               (id, actor_id, action, target_type, target_id, metadata_json, created_at)
+             SELECT ?1, ?2, 'bot_channel.created', 'bot_channel', ?3, ?4, ?5
+               FROM users AS actor
+              WHERE actor.id = ?2 AND actor.workspace_id = ?6
+                AND actor.role = 'owner' AND actor.status = 'active'
+                AND changes() = 1`,
+          )
+          .bind(
+            createUuidV7(),
+            identity.id,
+            channelTarget(request.provider, request.externalChannelId),
+            JSON.stringify({
+              provider: request.provider,
+              displayName: request.displayName,
+              enabled: request.enabled,
+            }),
+          now,
+          identity.workspaceId,
+          ),
       ]);
+      if (results[0]?.meta.changes !== 1) await this.requireCurrentOwner(identity);
     } catch (error) {
       if (isD1UniqueConstraintError(error)) {
         throw new ApiProblem("INVALID_REQUEST", 409, "This channel is already configured");
@@ -429,12 +498,35 @@ export class AdminService {
     const results = await this.database.batch([
       this.database
         .prepare(
+          `UPDATE bot_channel_allowlist
+              SET display_name = ?1, enabled = ?2, updated_at = ?3
+            WHERE workspace_id = ?4 AND provider = ?5 AND external_channel_id = ?6
+              AND updated_at = ?7
+              AND EXISTS (
+                SELECT 1 FROM users AS actor
+                 WHERE actor.id = ?8 AND actor.workspace_id = ?4
+                   AND actor.role = 'owner' AND actor.status = 'active'
+              )`,
+        )
+        .bind(
+          displayName,
+          enabled ? 1 : 0,
+          now,
+          identity.workspaceId,
+          provider,
+          externalChannelId,
+          current.updated_at,
+          identity.id,
+        ),
+      this.database
+        .prepare(
           `INSERT INTO audit_events
              (id, actor_id, action, target_type, target_id, metadata_json, created_at)
            SELECT ?1, ?2, 'bot_channel.updated', 'bot_channel', ?3, ?4, ?5
-             FROM bot_channel_allowlist
-            WHERE workspace_id = ?6 AND provider = ?7 AND external_channel_id = ?8
-              AND updated_at = ?9`,
+             FROM users AS actor
+            WHERE actor.id = ?2 AND actor.workspace_id = ?6
+              AND actor.role = 'owner' AND actor.status = 'active'
+              AND changes() = 1`,
         )
         .bind(
           createUuidV7(),
@@ -446,28 +538,12 @@ export class AdminService {
           }),
           now,
           identity.workspaceId,
-          provider,
-          externalChannelId,
-          current.updated_at,
-        ),
-      this.database
-        .prepare(
-          `UPDATE bot_channel_allowlist
-              SET display_name = ?1, enabled = ?2, updated_at = ?3
-            WHERE workspace_id = ?4 AND provider = ?5 AND external_channel_id = ?6
-              AND updated_at = ?7`,
-        )
-        .bind(
-          displayName,
-          enabled ? 1 : 0,
-          now,
-          identity.workspaceId,
-          provider,
-          externalChannelId,
-          current.updated_at,
         ),
     ]);
-    if (results[1]?.meta.changes !== 1) throw botChannelConflict();
+    if (results[0]?.meta.changes !== 1) {
+      await this.requireCurrentOwner(identity);
+      throw botChannelConflict();
+    }
     const updated = await this.findBotChannel(identity.workspaceId, provider, externalChannelId);
     if (updated === null) throw botChannelNotFound();
     return mapBotChannel(updated);
@@ -485,12 +561,25 @@ export class AdminService {
     const results = await this.database.batch([
       this.database
         .prepare(
+          `DELETE FROM bot_channel_allowlist
+            WHERE workspace_id = ?1 AND provider = ?2 AND external_channel_id = ?3
+              AND updated_at = ?4
+              AND EXISTS (
+                SELECT 1 FROM users AS actor
+                 WHERE actor.id = ?5 AND actor.workspace_id = ?1
+                   AND actor.role = 'owner' AND actor.status = 'active'
+              )`,
+        )
+        .bind(identity.workspaceId, provider, externalChannelId, current.updated_at, identity.id),
+      this.database
+        .prepare(
           `INSERT INTO audit_events
              (id, actor_id, action, target_type, target_id, metadata_json, created_at)
            SELECT ?1, ?2, 'bot_channel.deleted', 'bot_channel', ?3, ?4, ?5
-             FROM bot_channel_allowlist
-            WHERE workspace_id = ?6 AND provider = ?7 AND external_channel_id = ?8
-              AND updated_at = ?9`,
+             FROM users AS actor
+            WHERE actor.id = ?2 AND actor.workspace_id = ?6
+              AND actor.role = 'owner' AND actor.status = 'active'
+              AND changes() = 1`,
         )
         .bind(
           createUuidV7(),
@@ -503,19 +592,12 @@ export class AdminService {
           }),
           now,
           identity.workspaceId,
-          provider,
-          externalChannelId,
-          current.updated_at,
         ),
-      this.database
-        .prepare(
-          `DELETE FROM bot_channel_allowlist
-            WHERE workspace_id = ?1 AND provider = ?2 AND external_channel_id = ?3
-              AND updated_at = ?4`,
-        )
-        .bind(identity.workspaceId, provider, externalChannelId, current.updated_at),
     ]);
-    if (results[1]?.meta.changes !== 1) throw botChannelNotFound();
+    if (results[0]?.meta.changes !== 1) {
+      await this.requireCurrentOwner(identity);
+      throw botChannelNotFound();
+    }
   }
 
   private async findMember(workspaceId: string, memberId: string): Promise<MemberRow | null> {
@@ -658,6 +740,19 @@ export class AdminService {
       )
       .bind(workspaceId, provider, externalChannelId)
       .first<BotChannelRow>();
+  }
+
+  private async requireCurrentOwner(identity: AuthenticatedIdentity): Promise<void> {
+    const current = await this.database
+      .prepare(
+        `SELECT 1 FROM users
+          WHERE id = ?1 AND workspace_id = ?2 AND role = 'owner' AND status = 'active'`,
+      )
+      .bind(identity.id, identity.workspaceId)
+      .first();
+    if (current === null) {
+      throw new ApiProblem("FORBIDDEN", 403, "Workspace owner access is required");
+    }
   }
 }
 

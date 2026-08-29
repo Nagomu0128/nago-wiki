@@ -114,4 +114,29 @@ describe("bot account links", () => {
     ).first<{ count: number }>();
     expect(audit?.count).toBe(1);
   });
+
+  it("removes every identity for the unlinked provider", async () => {
+    const now = new Date().toISOString();
+    await env.DB.batch([
+      env.DB
+        .prepare(
+          `INSERT INTO external_identities (provider, external_subject, user_id, linked_at)
+           VALUES ('discord', 'discord-user-first', ?1, ?2)`,
+        )
+        .bind(userId, now),
+      env.DB
+        .prepare(
+          `INSERT INTO external_identities (provider, external_subject, user_id, linked_at)
+           VALUES ('discord', 'discord-user-second', ?1, ?2)`,
+        )
+        .bind(userId, now),
+    ]);
+
+    await expect(unlinkBotAccount(env.DB, userId, "discord")).resolves.toBe(true);
+    await expect(listLinkedBotAccounts(env.DB, userId)).resolves.toEqual([]);
+    const audit = await env.DB.prepare(
+      `SELECT count(*) AS count FROM audit_events WHERE action = 'bot_identity.unlinked'`,
+    ).first<{ count: number }>();
+    expect(audit?.count).toBe(1);
+  });
 });
