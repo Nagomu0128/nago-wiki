@@ -159,6 +159,7 @@ describe("LINE mention extraction", () => {
     expect(send).toHaveBeenCalledTimes(2);
     const queuedJob = botQueryJobSchema.parse(sentJobs[1]);
     expect(queuedJob.response.kind).toBe("line-reply-then-push");
+    if (queuedJob.response.kind !== "line-reply-then-push") throw new Error("Expected reply job");
     expect(queuedJob.response.replyToken).toBe("reply-token");
     expect(queuedJob.response.replyExpiresAt).toBeGreaterThan(0);
   });

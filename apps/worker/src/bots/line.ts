@@ -145,9 +145,8 @@ export async function sendLineReply(
     throw new LineReplyRetryableError();
   }
   if (reply.ok) return;
-  // With a locally constructed text message, a 400 response means the token
-  // is no longer usable (expired or already consumed). LINE does not send a
-  // reply message for 400 responses, so a push fallback is safe.
+  // A 400 means the token is no longer usable (expired or already consumed).
+  // The consumer decides whether a push fallback is safe for this attempt.
   if (reply.status === 400) throw new LineReplyUnavailableError("rejected");
   if (reply.status === 429 || reply.status >= 500) {
     throw new LineReplyRetryableError(reply.status);
