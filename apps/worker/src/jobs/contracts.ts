@@ -17,7 +17,15 @@ export const botQueryJobSchema = z.object({
   externalChannelId: z.string().min(1).nullable(),
   query: z.string().min(1).max(5_000),
   response: z.discriminatedUnion("kind", [
+    // Old queue messages may remain in flight while the Worker rolls out.
     z.object({ kind: z.literal("line-push") }),
+    z.object({
+      kind: z.literal("line-reply-then-push"),
+      // This credential is intentionally ephemeral: it is carried only by the
+      // queue message, never persisted in D1, and is omitted from all logs.
+      replyToken: z.string().min(1).max(4_096),
+      replyExpiresAt: z.number().int().nonnegative(),
+    }),
   ]),
 });
 

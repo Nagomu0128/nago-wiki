@@ -32,6 +32,32 @@ const lineEventSchema = z.object({
 
 const webhookSchema = z.object({ events: z.array(z.unknown()).max(100) });
 const MAX_LINE_WEBHOOK_BYTES = 1024 * 1024;
+// LINE documents reply tokens as usable for up to one minute, but does not
+// guarantee that full minute. Keep a safety margin for Queue latency.
+export const LINE_REPLY_TOKEN_SAFE_LIFETIME_MS = 50_000;
+
+export class LineReplyUnavailableError extends Error {
+  public constructor(public readonly reason: "expired" | "rejected") {
+    super("LINE reply token is unavailable");
+    this.name = "LineReplyUnavailableError";
+  }
+}
+
+export class LineReplyRetryableError extends Error {
+  public constructor(status?: number) {
+    super(status === undefined
+      ? "LINE reply request did not complete"
+      : `LINE reply failed with retryable status ${String(status)}`);
+    this.name = "LineReplyRetryableError";
+  }
+}
+
+export class LineReplyPermanentError extends Error {
+  public constructor(status: number) {
+    super(`LINE reply failed with permanent status ${String(status)}`);
+    this.name = "LineReplyPermanentError";
+  }
+}
 
 export async function handleLineWebhook(
   request: Request,
@@ -74,7 +100,11 @@ export async function handleLineWebhook(
       externalUserId: event.data.source.userId,
       externalChannelId,
       query,
-      response: { kind: "line-push" },
+      response: {
+        kind: "line-reply-then-push",
+        replyToken: event.data.replyToken,
+        replyExpiresAt: Date.now() + LINE_REPLY_TOKEN_SAFE_LIFETIME_MS,
+      },
     };
     try {
       await environment.ASYNC_JOBS.send(job, { contentType: "json" });
@@ -92,6 +122,36 @@ export async function handleLineWebhook(
     }
   }
   return new Response("OK");
+}
+
+export async function sendLineReply(
+  environment: Pick<McpRuntimeEnv, "LINE_CHANNEL_ACCESS_TOKEN">,
+  replyToken: string,
+  text: string,
+): Promise<void> {
+  let reply: Response;
+  try {
+    reply = await fetch("https://api.line.me/v2/bot/message/reply", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${environment.LINE_CHANNEL_ACCESS_TOKEN}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ replyToken, messages: [{ type: "text", text }] }),
+    });
+  } catch {
+    // A network failure is ambiguous: the request may have reached LINE, so
+    // retry while the token is still valid instead of risking a duplicate push.
+    throw new LineReplyRetryableError();
+  }
+  if (reply.ok) return;
+  // A 400 means the token is no longer usable (expired or already consumed).
+  // The consumer decides whether a push fallback is safe for this attempt.
+  if (reply.status === 400) throw new LineReplyUnavailableError("rejected");
+  if (reply.status === 429 || reply.status >= 500) {
+    throw new LineReplyRetryableError(reply.status);
+  }
+  throw new LineReplyPermanentError(reply.status);
 }
 
 export async function sendLinePush(

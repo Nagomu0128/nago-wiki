@@ -6,7 +6,9 @@ import {
   handleLineWebhook,
   lineRetryKey,
   sendLinePush,
+  sendLineReply,
 } from "../../src/bots/line";
+import { botQueryJobSchema } from "../../src/jobs/contracts";
 import type { McpRuntimeEnv } from "../../src/mcp/types";
 
 afterEach(() => {
@@ -79,6 +81,27 @@ describe("LINE mention extraction", () => {
     ).resolves.toBeUndefined();
   });
 
+  it("sends a reply with the webhook token", async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await sendLineReply(
+      { LINE_CHANNEL_ACCESS_TOKEN: "token" },
+      "reply-token",
+      "answer",
+    );
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.line.me/v2/bot/message/reply",
+      expect.objectContaining({
+        body: JSON.stringify({
+          replyToken: "reply-token",
+          messages: [{ type: "text", text: "answer" }],
+        }),
+      }),
+    );
+  });
+
   it("releases the event reservation when Queue enqueue fails", async () => {
     await env.DB.prepare(
       "DELETE FROM bot_events WHERE provider = 'line' AND event_id = ?1",
@@ -100,9 +123,13 @@ describe("LINE mention extraction", () => {
     const secret = "line-secret";
     const signature = await lineSignature(body, secret);
     let queueAvailable = false;
-    const send = vi.fn(() => queueAvailable
-      ? Promise.resolve()
-      : Promise.reject(new Error("queue unavailable")));
+    const sentJobs: unknown[] = [];
+    const send = vi.fn((job: unknown) => {
+      sentJobs.push(job);
+      return queueAvailable
+        ? Promise.resolve()
+        : Promise.reject(new Error("queue unavailable"));
+    });
     const environment = {
       DB: env.DB,
       ASYNC_JOBS: { send },
@@ -130,6 +157,11 @@ describe("LINE mention extraction", () => {
       status: 200,
     });
     expect(send).toHaveBeenCalledTimes(2);
+    const queuedJob = botQueryJobSchema.parse(sentJobs[1]);
+    expect(queuedJob.response.kind).toBe("line-reply-then-push");
+    if (queuedJob.response.kind !== "line-reply-then-push") throw new Error("Expected reply job");
+    expect(queuedJob.response.replyToken).toBe("reply-token");
+    expect(queuedJob.response.replyExpiresAt).toBeGreaterThan(0);
   });
 });
 
